@@ -1,0 +1,6 @@
+name: apds9960
+version: "0.1.0"
+description: I2C driver for APDS9960 gesture sensor using ESP‑IDF v5.4 native I2C API
+dependencies:
+  idf: ">=5.4"
+  cmake_utilities: "0.*"
