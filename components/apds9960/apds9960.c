@@ -11,21 +11,20 @@
 #include "esp_check.h"
 #include "esp_log.h"
 
-
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
 #include "apds9960.h"
 
-static const char *TAG = "apds9960";
+// static const char *TAG = "apds9960";
 
 #define APDS9960_TIMEOUT_MS_DEFAULT   1000U
 
 typedef struct apds9960_dev_t {
-	i2c_master_dev_handle_t i2c_dev; 
+    i2c_master_dev_handle_t i2c_dev;
 
     uint8_t                dev_addr;
-    uint32_t               timeout;
+    uint32_t               timeout; /* milliseconds */
     apds9960_control_t     _control_t;
     apds9960_enable_t      _enable_t;
     apds9960_config1_t     _config1_t;
@@ -51,33 +50,33 @@ typedef struct apds9960_dev_t {
 /* I2C helpers                                                                */
 /* -------------------------------------------------------------------------- */
 
-static inline TickType_t _timeout_ticks(const apds9960_dev_t *d)
+static inline int _timeout_ms(const apds9960_dev_t *d)
 {
-    return pdMS_TO_TICKS(d->timeout);
+    return (int)d->timeout;
 }
 
 static esp_err_t _i2c_write_byte(const apds9960_dev_t *d, uint8_t reg, uint8_t val)
 {
     uint8_t buf[2] = { reg, val };
-    return i2c_master_transmit(d->i2c_dev, buf, sizeof(buf), _timeout_ticks(d));
+    return i2c_master_transmit(d->i2c_dev, buf, sizeof(buf), _timeout_ms(d));
 }
 
-static esp_err_t _i2c_write_cmd(const apds9960_dev_t *d, uint8_t cmd)
+/* Write a value to a command/clear register by sending reg + one data byte. */
+static esp_err_t _i2c_write_cmd(const apds9960_dev_t *d, uint8_t cmd_reg)
 {
-    return i2c_master_transmit(d->i2c_dev, &cmd, 1, _timeout_ticks(d));
+    uint8_t buf[2] = { cmd_reg, 0x00 };
+    return i2c_master_transmit(d->i2c_dev, buf, sizeof(buf), _timeout_ms(d));
 }
 
 static esp_err_t _i2c_read_byte(const apds9960_dev_t *d, uint8_t reg, uint8_t *val)
 {
-    ESP_RETURN_ON_ERROR(i2c_master_transmit(d->i2c_dev, &reg, 1, _timeout_ticks(d)), TAG, "TX");
-    return i2c_master_receive(d->i2c_dev, val, 1, _timeout_ticks(d));
+    return i2c_master_transmit_receive(d->i2c_dev, &reg, 1, val, 1, _timeout_ms(d));
 }
 
 static esp_err_t _i2c_read_bytes(const apds9960_dev_t *d, uint8_t reg,
                                  uint8_t *data, size_t len)
 {
-    ESP_RETURN_ON_ERROR(i2c_master_transmit(d->i2c_dev, &reg, 1, _timeout_ticks(d)), TAG, "TX");
-    return i2c_master_receive(d->i2c_dev, data, len, _timeout_ticks(d));
+    return i2c_master_transmit_receive(d->i2c_dev, &reg, 1, data, len, _timeout_ms(d));
 }
 
 static float __powf(const float x, const float y)
@@ -86,7 +85,7 @@ static float __powf(const float x, const float y)
 }
 
 /* -------------------------------------------------------------------------- */
-/* Small bitfield pack/unpack helpers (unchanged logic)                        */
+/* Small bitfield pack/unpack helpers                                         */
 /* -------------------------------------------------------------------------- */
 
 uint8_t apds9960_get_enable(apds9960_handle_t sensor)
@@ -359,7 +358,7 @@ esp_err_t apds9960_set_proximity_gain(apds9960_handle_t sensor, apds9960_pgain_t
     apds9960_dev_t *sens = (apds9960_dev_t *)sensor;
     sens->_control_t.pgain = pgain;
     return _i2c_write_byte(sens, APDS9960_CONTROL,
-                           (sens->_control_t.leddrive << 6) | (sens->_control_t.pgain << 2) | sens->_control_t.again);
+                           (sens->_control_t.leddrive << 6) | (sens->_control_t.pgain << 2) | (sens->_control_t.again));
 }
 
 apds9960_pgain_t apds9960_get_proximity_gain(apds9960_handle_t sensor)
@@ -413,13 +412,13 @@ esp_err_t apds9960_get_color_data(apds9960_handle_t sensor, uint16_t *r, uint16_
     uint8_t data[2];
 
     _i2c_read_bytes(sens, APDS9960_CDATAL, data, 2);
-    *c = (data[1] << 8) | data[0];
+    *c = (uint16_t)((data[1] << 8) | data[0]);
     _i2c_read_bytes(sens, APDS9960_RDATAL, data, 2);
-    *r = (data[1] << 8) | data[0];
+    *r = (uint16_t)((data[1] << 8) | data[0]);
     _i2c_read_bytes(sens, APDS9960_GDATAL, data, 2);
-    *g = (data[1] << 8) | data[0];
+    *g = (uint16_t)((data[1] << 8) | data[0]);
     _i2c_read_bytes(sens, APDS9960_BDATAL, data, 2);
-    *b = (data[1] << 8) | data[0];
+    *b = (uint16_t)((data[1] << 8) | data[0]);
     return ESP_OK;
 }
 
@@ -467,10 +466,10 @@ esp_err_t apds9960_enable_color_interrupt(apds9960_handle_t sensor, bool en)
 esp_err_t apds9960_set_int_limits(apds9960_handle_t sensor, uint16_t low, uint16_t high)
 {
     apds9960_dev_t *sens = (apds9960_dev_t *)sensor;
-    _i2c_write_byte(sens, APDS9960_AILTL, low & 0xFF);
-    _i2c_write_byte(sens, APDS9960_AILTH, low >> 8);
-    _i2c_write_byte(sens, APDS9960_AIHTL, high & 0xFF);
-    return _i2c_write_byte(sens, APDS9960_AIHTH, high >> 8);
+    _i2c_write_byte(sens, APDS9960_AILTL, (uint8_t)(low & 0xFF));
+    _i2c_write_byte(sens, APDS9960_AILTH, (uint8_t)(low >> 8));
+    _i2c_write_byte(sens, APDS9960_AIHTL, (uint8_t)(high & 0xFF));
+    return _i2c_write_byte(sens, APDS9960_AIHTH, (uint8_t)(high >> 8));
 }
 
 esp_err_t apds9960_enable_proximity_interrupt(apds9960_handle_t sensor, bool en)
@@ -545,8 +544,8 @@ esp_err_t apds9960_set_gesture_dimensions(apds9960_handle_t sensor, uint8_t dims
 esp_err_t apds9960_set_light_intlow_threshold(apds9960_handle_t sensor, uint16_t threshold)
 {
     apds9960_dev_t *sens = (apds9960_dev_t *)sensor;
-    uint8_t val_low  = threshold & 0x00FF;
-    uint8_t val_high = (threshold & 0xFF00) >> 8;
+    uint8_t val_low  = (uint8_t)(threshold & 0x00FF);
+    uint8_t val_high = (uint8_t)((threshold & 0xFF00) >> 8);
 
     if (_i2c_write_byte(sens, APDS9960_AILTL, val_low) != ESP_OK) {
         return ESP_FAIL;
@@ -557,8 +556,8 @@ esp_err_t apds9960_set_light_intlow_threshold(apds9960_handle_t sensor, uint16_t
 esp_err_t apds9960_set_light_inthigh_threshold(apds9960_handle_t sensor, uint16_t threshold)
 {
     apds9960_dev_t *sens = (apds9960_dev_t *)sensor;
-    uint8_t val_low  = threshold & 0x00FF;
-    uint8_t val_high = (threshold & 0xFF00) >> 8;
+    uint8_t val_low  = (uint8_t)(threshold & 0x00FF);
+    uint8_t val_high = (uint8_t)((threshold & 0xFF00) >> 8);
 
     if (_i2c_write_byte(sens, APDS9960_AIHTL, val_low) != ESP_OK) {
         return ESP_FAIL;
@@ -617,18 +616,17 @@ esp_err_t apds9960_set_gesture_offset(apds9960_handle_t sensor, uint8_t offset_u
     return ESP_OK;
 }
 
-
 uint8_t apds9960_read_gesture(apds9960_handle_t sensor)
 {
-    uint8_t             fifo_level;          /* value read from GFLVL register          */
-    size_t              bytes_to_read;       /* number of UDLR bytes we’ll actually get */
-    uint8_t             buf[256];            /* APDS9960 FIFO can hold up to 128 sets   */
+    uint8_t             fifo_level;
+    size_t              bytes_to_read;
+    uint8_t             buf[256];
     TickType_t          start_tick = 0;
     uint8_t             gesture_received = 0;
     apds9960_dev_t     *dev = (apds9960_dev_t *)sensor;
 
     for (;;) {
-        int up_down_diff   = 0;
+        int up_down_diff    = 0;
         int left_right_diff = 0;
         gesture_received    = 0;
 
@@ -638,19 +636,23 @@ uint8_t apds9960_read_gesture(apds9960_handle_t sensor)
 
         vTaskDelay(pdMS_TO_TICKS(30));
 
-        /* 1. How many datasets are waiting? (0‑32 by datasheet) */
         _i2c_read_byte(dev, APDS9960_GFLVL, &fifo_level);
 
-        /* 2. Clamp to our local buffer size to silence the warning */
-        bytes_to_read = fifo_level;
+        /* GFLVL reports datasets; each dataset is 4 bytes (U,D,L,R). */
+        bytes_to_read = (size_t)fifo_level * 4U;
+        if (bytes_to_read == 0) {
+            continue;
+        }
         if (bytes_to_read > sizeof(buf)) {
             bytes_to_read = sizeof(buf);
         }
+        bytes_to_read -= (bytes_to_read % 4U);
+        if (bytes_to_read == 0) {
+            continue;
+        }
 
-        /* 3. Burst‑read that many bytes from the FIFO */
         _i2c_read_bytes(dev, APDS9960_GFIFO_U, buf, bytes_to_read);
 
-        /* 4. Analyse the first UDLR set (buf[0]‑buf[3]) exactly as before */
         if (abs((int)buf[0] - (int)buf[1]) > 13) {
             up_down_diff += (int)buf[0] - (int)buf[1];
         }
@@ -666,7 +668,7 @@ uint8_t apds9960_read_gesture(apds9960_handle_t sensor)
                 } else {
                     dev->up_cnt++;
                 }
-            } else { /* up_down_diff > 0 */
+            } else {
                 if (dev->up_cnt > 0) {
                     gesture_received = APDS9960_DOWN;
                 } else {
@@ -682,7 +684,7 @@ uint8_t apds9960_read_gesture(apds9960_handle_t sensor)
                 } else {
                     dev->left_cnt++;
                 }
-            } else { /* left_right_diff > 0 */
+            } else {
                 if (dev->left_cnt > 0) {
                     gesture_received = APDS9960_RIGHT;
                 } else {
@@ -702,7 +704,6 @@ uint8_t apds9960_read_gesture(apds9960_handle_t sensor)
         }
     }
 }
-
 
 bool apds9960_gesture_valid(apds9960_handle_t sensor)
 {
@@ -735,13 +736,12 @@ esp_err_t apds9960_set_gesture_exit_thresh(apds9960_handle_t sensor, uint8_t thr
 }
 
 /* -------------------------------------------------------------------------- */
-/* Create / Delete / Init                                                      */
+/* Create / Delete / Init                                                     */
 /* -------------------------------------------------------------------------- */
-
 
 apds9960_handle_t apds9960_create(i2c_master_bus_handle_t bus, uint8_t addr)
 {
-    apds9960_dev_t *d = calloc(1, sizeof(*d));
+    apds9960_dev_t *d = (apds9960_dev_t *)calloc(1, sizeof(*d));
     if (!d) return NULL;
 
     i2c_device_config_t cfg = {
@@ -749,7 +749,11 @@ apds9960_handle_t apds9960_create(i2c_master_bus_handle_t bus, uint8_t addr)
         .device_address  = addr,
         .scl_speed_hz    = 400000,
     };
-    ESP_ERROR_CHECK_WITHOUT_ABORT(i2c_master_bus_add_device(bus, &cfg, &d->i2c_dev));
+    esp_err_t err = i2c_master_bus_add_device(bus, &cfg, &d->i2c_dev);
+    if (err != ESP_OK) {
+        free(d);
+        return NULL;
+    }
     d->timeout = APDS9960_TIMEOUT_MS_DEFAULT;
     return (apds9960_handle_t)d;
 }
@@ -759,7 +763,12 @@ esp_err_t apds9960_delete(apds9960_handle_t *sensor)
     if (sensor == NULL || *sensor == NULL) {
         return ESP_OK;
     }
-    free(*sensor);
+    apds9960_dev_t *d = (apds9960_dev_t *)(*sensor);
+    if (d->i2c_dev) {
+        i2c_master_bus_rm_device(d->i2c_dev);
+        d->i2c_dev = NULL;
+    }
+    free(d);
     *sensor = NULL;
     return ESP_OK;
 }
@@ -788,3 +797,16 @@ esp_err_t apds9960_gesture_init(apds9960_handle_t sensor)
     return apds9960_enable_gesture_engine(sensor, true);
 }
 
+float apds9960_calc_lux_from_rgb(uint16_t red, uint16_t green, uint16_t blue)
+{
+    /* Same coefficients your driver uses, but keep as float and avoid truncation. */
+    float r = (float)red;
+    float g = (float)green;
+    float b = (float)blue;
+
+    float illuminance = (-0.32466f * r) + (1.57837f * g) + (-0.73191f * b);
+    if (illuminance < 0.0f) {
+        illuminance = 0.0f;
+    }
+    return illuminance;
+}

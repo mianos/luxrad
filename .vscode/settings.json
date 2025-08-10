@@ -3,9 +3,9 @@
   "idf.espIdfPath": "/Users/robertfowler/esp/v5.4.1/esp-idf",
   "idf.pythonInstallPath": "/opt/local/bin/python",
   "idf.openOcdConfigs": [
-    "board/esp32c3-bridge.cfg"
+    "board/esp32c3-ftdi.cfg"
   ],
-  "idf.port": "/dev/tty.usbmodem14201",
+  "idf.port": "/dev/tty.usbmodem144101",
   "idf.toolsPath": "/Users/robertfowler/.espressif",
   "idf.customExtraVars": {
     "IDF_TARGET": "esp32c3"
@@ -16,5 +16,6 @@
     "--query-driver=/Users/robertfowler/.espressif/tools/riscv32-esp-elf/esp-14.2.0_20241119/riscv32-esp-elf/bin/riscv32-esp-elf-gcc",
     "--compile-commands-dir=/Users/robertfowler/tmp/ldr3"
   ],
-  "idf.buildPath": "/Users/robertfowler/tmp/ldr3"
+  "idf.buildPath": "/Users/robertfowler/tmp/ldr3",
+  "idf.flashType": "UART"
 }

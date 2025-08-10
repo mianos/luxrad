@@ -371,6 +371,7 @@ esp_err_t apds9960_clear_interrupt(apds9960_handle_t sensor);
 esp_err_t apds9960_enable(apds9960_handle_t sensor, bool en);
 esp_err_t apds9960_set_light_intlow_threshold(apds9960_handle_t sensor, uint16_t threshold);
 esp_err_t apds9960_set_light_inthigh_threshold(apds9960_handle_t sensor, uint16_t threshold);
+float apds9960_calc_lux_from_rgb(uint16_t red, uint16_t green, uint16_t blue);
 
 #ifdef __cplusplus
 }
