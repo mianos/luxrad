@@ -17,7 +17,7 @@ public:
 private:
     RadarSensor* sensor_;
     uint32_t intervalMs_;
-    uint64_t nextSendTimeMs_ = 0;
+    uint64_t windowEndMs_ = 0;
 
     std::vector<std::unique_ptr<Value>> lastSent_;
     std::vector<std::unique_ptr<Value>> pending_;
@@ -26,7 +26,7 @@ private:
         const std::vector<std::unique_ptr<Value>>& src);
 
     static bool Equal(
-        const std::vector<std::unique_ptr<Value>>& a,
-        const std::vector<std::unique_ptr<Value>>& b);
+        const std::vector<std::unique_ptr<Value>>& left_values,
+        const std::vector<std::unique_ptr<Value>>& right_values);
 };
 

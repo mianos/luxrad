@@ -87,7 +87,7 @@ static void RadarTask(void* arg) {
     LD1125 ld1125(&event_processor, kUartPort);
     ld1125.verifyTestMode();
 
-    DebounceRadar debounced(&ld1125, &event_processor, 200);
+    DebounceRadar debounced(&ld1125, &event_processor, 1000);
 
     for (;;) {
         debounced.process(0.0f);
