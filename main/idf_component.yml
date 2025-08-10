@@ -1,0 +1,11 @@
+dependencies:
+  jsonwrapper:
+    git: https://github.com/mianos/mianesp.git
+    path: components/jsonwrapper
+    version: main
+  ldradar:
+    git: https://github.com/mianos/ldradar.git
+    version: main
+  apds9960:
+    git: https://github.com/mianos/apds9960.git
+    version: main
