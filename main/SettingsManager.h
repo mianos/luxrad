@@ -5,7 +5,6 @@
 #include <utility>
 
 #include "esp_log.h"
-
 #include "NvsStorageManager.h"
 #include "JsonWrapper.h"
 
@@ -14,7 +13,7 @@ class SettingsManager {
 public:
     using ChangeList = std::vector<std::pair<std::string, std::string>>;
 
-    SettingsManager(NvsStorageManager& nvs) : nvs(nvs) {
+    SettingsManager(NvsStorageManager& nvs_in) : nvs(nvs_in) {
         loadSettings();
     }
 
@@ -24,18 +23,17 @@ public:
     std::string sensorName = "ldr";
     std::string tz = "AEST-10AEDT,M10.1.0,M4.1.0/3";
     std::string ntpServer = "time.google.com";
-
-    // Additive: lux publish period in seconds. 0 disables publishing.
     int luxPeriodSec = 1;
+    int presencePeriodSec = 1;
 
     std::string convertChangesToJson(const SettingsManager::ChangeList& changes) {
-        cJSON *root = cJSON_CreateObject();
+        cJSON* root = cJSON_CreateObject();
         for (const auto& pair_item : changes) {
             const std::string& key = pair_item.first;
             const std::string& value = pair_item.second;
             cJSON_AddStringToObject(root, key.c_str(), value.c_str());
         }
-        char *rawJson = cJSON_Print(root);
+        char* rawJson = cJSON_Print(root);
         std::string jsonResponse(rawJson);
         cJSON_Delete(root);
         free(rawJson);
@@ -52,6 +50,7 @@ public:
         nvs.retrieve("tz", tz);
         nvs.retrieve("ntpServer", ntpServer);
         if (nvs.retrieve("luxPeriodSec", value)) luxPeriodSec = std::stoi(value);
+        if (nvs.retrieve("presencePeriodSec", value)) presencePeriodSec = std::stoi(value);
     }
 
     void toJsonWrapper(JsonWrapper& json) const {
@@ -62,6 +61,7 @@ public:
         json.AddItem("tz", tz);
         json.AddItem("ntpServer", ntpServer);
         json.AddItem("luxPeriodSec", luxPeriodSec);
+        json.AddItem("presencePeriodSec", presencePeriodSec);
     }
 
     std::string toJson() const {
@@ -70,12 +70,12 @@ public:
         return json.ToString();
     }
 
-   ChangeList updateFromJsonString(const std::string& jsonString) {
+    ChangeList updateFromJsonString(const std::string& jsonString) {
         const JsonWrapper json = JsonWrapper::Parse(jsonString);
         return updateFromJsonWrapper(json);
-   }
+    }
 
-   ChangeList updateFromJsonWrapper(const JsonWrapper& json) {
+    ChangeList updateFromJsonWrapper(const JsonWrapper& json) {
         ChangeList changes;
         updateFieldIfChanged(json, "mqttBrokerUri", mqttBrokerUri, changes);
         updateFieldIfChanged(json, "mqttUserName", mqttUserName, changes);
@@ -84,6 +84,7 @@ public:
         updateFieldIfChanged(json, "tz", tz, changes);
         updateFieldIfChanged(json, "ntpServer", ntpServer, changes);
         updateFieldIfChanged(json, "luxPeriodSec", luxPeriodSec, changes);
+        updateFieldIfChanged(json, "presencePeriodSec", presencePeriodSec, changes);
 
         for (const auto& pair_item : changes) {
             const std::string& key = pair_item.first;
@@ -91,11 +92,14 @@ public:
             nvs.store(key, value);
         }
         return changes;
-   }
+    }
 
 private:
     template <typename T>
-    void updateFieldIfChanged(const JsonWrapper& json, const std::string& key, T& field, SettingsManager::ChangeList& changes) {
+    void updateFieldIfChanged(const JsonWrapper& json,
+                              const std::string& key,
+                              T& field,
+                              SettingsManager::ChangeList& changes) {
         if (json.ContainsField(key)) {
             T newValue;
             if (json.GetField(key, newValue)) {
