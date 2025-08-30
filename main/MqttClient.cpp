@@ -93,13 +93,22 @@ void MqttClient::registerHandlers() {
   const std::string& device = settings.sensorName;
 
   std::vector<HandlerBinding> local_handlers = {
-      {"cmnd/+/settings",
-       std::regex("cmnd/" + device + "/settings"),
-       [](MqttClient* client_ptr, const std::string& topic, cJSON* data) {
-         JsonWrapper json_data(data);
-         ESP_LOGI(kMqttTag, "Settings handler: %s -> %s",
-                  topic.c_str(), json_data.ToString().c_str());
-       }}};
+      {
+        "cmnd/+/settings",
+        std::regex("cmnd/" + device + "/settings"),
+        [](MqttClient* client_ptr, const std::string& topic, cJSON* data) {
+          JsonWrapper json_data(data);
+          auto& s = client_ptr->getSettings();
+          auto changes = s.updateFromJsonWrapper(json_data);
+
+          JsonWrapper ack;
+          ack.AddItem("topic", topic);
+          ack.AddItem("applied", s.convertChangesToJson(changes));
+          ack.AddTime();
+          client_ptr->publish("tele/" + s.sensorName + "/settings", ack.ToString());
+        }
+      }
+  };
 
   for (const auto& hb : local_handlers) {
     subscribe(hb.subscriptionTopic);

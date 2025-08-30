@@ -68,7 +68,6 @@ static void initialize_sntp(SettingsManager& settings) {
     esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
     esp_sntp_setservername(0, settings.ntpServer.c_str());
     esp_sntp_init();
-    ESP_LOGI(kTag, "SNTP service initialized");
     int max_retry = 200;
     while (sntp_get_sync_status() == SNTP_SYNC_STATUS_RESET && max_retry--) {
         vTaskDelay(100 / portTICK_PERIOD_MS);
@@ -77,12 +76,6 @@ static void initialize_sntp(SettingsManager& settings) {
         ESP_LOGE(kTag, "Failed to synchronize NTP time");
         return;
     }
-    time_t now = time(nullptr);
-    struct tm timeinfo;
-    localtime_r(&now, &timeinfo);
-    ESP_LOGI("TimeTest", "Current local time and date: %d-%d-%d %d:%d:%d",
-             1900 + timeinfo.tm_year, 1 + timeinfo.tm_mon, timeinfo.tm_mday,
-             timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
 }
 
 // same init publish pattern you already use elsewhere
@@ -197,19 +190,16 @@ static void RadarTask(void* arg) {
 }
 
 extern "C" void app_main(void) {
+    // Silence info-level logs globally; leave warnings/errors visible
+    esp_log_level_set("*", ESP_LOG_WARN);
+
     g_wifi_semaphore = xSemaphoreCreateBinary();
 
     NvsStorageManager nvs_storage;
     SettingsManager settings(nvs_storage);
-    ESP_LOGI(kTag, "Loaded settings: %s", settings.toJson().c_str());
 
     WiFiManager wifi_manager(nvs_storage, LocalIpEventHandler, nullptr);
-    ESP_LOGI(kTag, "Waiting for WiFi IP...");
-    if (xSemaphoreTake(g_wifi_semaphore, portMAX_DELAY) != pdTRUE) {
-        ESP_LOGE(kTag, "Failed waiting for WiFi IP");
-    } else {
-        ESP_LOGI(kTag, "WiFi connected");
-    }
+    (void)xSemaphoreTake(g_wifi_semaphore, portMAX_DELAY);
 
     // MQTT bring-up and init publish
     MqttClient mqtt_client(settings);
@@ -258,27 +248,24 @@ extern "C" void app_main(void) {
 
     apds9960_handle_t sensor = apds9960_create(bus_handle, kApdsAddr);
     if (!sensor) {
-        ESP_LOGI(kTag, "APDS9960 not detected");
-        return;
-    }
-
-    uint8_t device_id = 0;
-    if (apds9960_get_deviceid(sensor, &device_id) == ESP_OK) {
-        ESP_LOGI(kTag, "APDS9960 ID: 0x%02X", device_id);
+        // keep running radar even if color sensor is missing
+        sensor = nullptr;
     } else {
-        ESP_LOGW(kTag, "Failed to read device ID");
-    }
-
-    apds9960_set_timeout(sensor, 1000);
-    if (apds9960_enable(sensor, true) != ESP_OK) {
-        ESP_LOGE(kTag, "Enable power failed");
-        return;
-    }
-    apds9960_set_adc_integration_time(sensor, 10);
-    apds9960_set_ambient_light_gain(sensor, APDS9960_AGAIN_4X);
-    if (apds9960_enable_color_engine(sensor, true) != ESP_OK) {
-        ESP_LOGE(kTag, "Enable ALS failed");
-        return;
+        uint8_t device_id = 0;
+        if (apds9960_get_deviceid(sensor, &device_id) != ESP_OK) {
+            ESP_LOGW(kTag, "Failed to read APDS9960 device ID");
+        }
+        apds9960_set_timeout(sensor, 1000);
+        if (apds9960_enable(sensor, true) != ESP_OK) {
+            ESP_LOGE(kTag, "Enable power failed");
+            return;
+        }
+        apds9960_set_adc_integration_time(sensor, 10);
+        apds9960_set_ambient_light_gain(sensor, APDS9960_AGAIN_4X);
+        if (apds9960_enable_color_engine(sensor, true) != ESP_OK) {
+            ESP_LOGE(kTag, "Enable ALS failed");
+            return;
+        }
     }
 
     uart_config_t uart_cfg;
@@ -308,38 +295,37 @@ extern "C" void app_main(void) {
 
     xTaskCreate(RadarTask, "radar_task", 4096, &combined_ep, 5, nullptr);
 
-    ESP_LOGI(kTag, "Reading lux…");
+    // periodic lux publishing to MQTT without console noise
+    uint32_t last_lux_ms = 0;
     for (;;) {
-        uint16_t red = 0;
-        uint16_t green = 0;
-        uint16_t blue = 0;
-        uint16_t clear_ch = 0;
+        const uint32_t now_ms = static_cast<uint32_t>(esp_timer_get_time() / 1000);
+        const int period_sec = settings.luxPeriodSec;
 
-        if (!apds9960_color_data_ready(sensor)) {
-            vTaskDelay(pdMS_TO_TICKS(50));
-            continue;
+        if (sensor && period_sec > 0 &&
+            (last_lux_ms == 0 || now_ms - last_lux_ms >= static_cast<uint32_t>(period_sec) * 1000U)) {
+            uint16_t red = 0;
+            uint16_t green = 0;
+            uint16_t blue = 0;
+            uint16_t clear_ch = 0;
+
+            if (apds9960_color_data_ready(sensor)) {
+                if (apds9960_get_color_data(sensor, &red, &green, &blue, &clear_ch) == ESP_OK) {
+                    float lux = apds9960_calc_lux_from_rgb(red, green, blue);
+
+                    JsonWrapper lux_doc;
+                    lux_doc.AddItem("red", static_cast<int>(red));
+                    lux_doc.AddItem("green", static_cast<int>(green));
+                    lux_doc.AddItem("blue", static_cast<int>(blue));
+                    lux_doc.AddItem("clear", static_cast<int>(clear_ch));
+                    lux_doc.AddItem("lux", lux);
+                    lux_doc.AddTime();
+                    mqtt_client.publish("tele/" + settings.sensorName + "/lux", lux_doc.ToString());
+                }
+            }
+            last_lux_ms = now_ms;
         }
 
-        if (apds9960_get_color_data(sensor, &red, &green, &blue, &clear_ch) != ESP_OK) {
-            ESP_LOGW(kTag, "Color read failed");
-            vTaskDelay(pdMS_TO_TICKS(300));
-            continue;
-        }
-
-        float lux = apds9960_calc_lux_from_rgb(red, green, blue);
-        ESP_LOGI(kTag, "R:%u G:%u B:%u  C:%u  Lux:%.2f", red, green, blue, clear_ch, lux);
-
-        // publish lux to MQTT
-        JsonWrapper lux_doc;
-        lux_doc.AddItem("red", static_cast<int>(red));
-        lux_doc.AddItem("green", static_cast<int>(green));
-        lux_doc.AddItem("blue", static_cast<int>(blue));
-        lux_doc.AddItem("clear", static_cast<int>(clear_ch));
-        lux_doc.AddItem("lux", lux);
-        lux_doc.AddTime();
-        mqtt_client.publish("tele/" + settings.sensorName + "/lux", lux_doc.ToString());
-
-        vTaskDelay(pdMS_TO_TICKS(300));
+        vTaskDelay(pdMS_TO_TICKS(50));
     }
 }
 
