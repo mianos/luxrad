@@ -3,6 +3,9 @@
 
 #include "esp_err.h"
 #include "esp_log.h"
+#include "esp_netif.h"
+#include "esp_event.h"
+#include "esp_timer.h"
 
 #include "driver/gpio.h"
 #include "driver/i2c_master.h"
@@ -10,6 +13,7 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 
 extern "C" {
 #include "apds9960.h"
@@ -20,6 +24,10 @@ extern "C" {
 #include "RadarSensor.h"
 #include "Events.h"
 #include "JsonWrapper.h"
+
+#include "NvsStorageManager.h"
+#include "SettingsManager.h"
+#include "WifiManager.h"
 
 static const char* kTag = "apds9960_main";
 static const char* kRadarTag = "ld1125_main";
@@ -35,10 +43,25 @@ static constexpr uart_port_t kUartPort = UART_NUM_1;
 static constexpr gpio_num_t   kUartTx  = GPIO_NUM_3;
 static constexpr gpio_num_t   kUartRx  = GPIO_NUM_2;
 
+static SemaphoreHandle_t g_wifi_semaphore = nullptr;
+
+static void LocalIpEventHandler(void* handler_arg,
+                                esp_event_base_t event_base,
+                                int32_t event_id,
+                                void* event_data) {
+    (void)handler_arg;
+    (void)event_data;
+    if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
+        if (g_wifi_semaphore != nullptr) {
+            xSemaphoreGive(g_wifi_semaphore);
+        }
+    }
+}
+
 class PrintEP : public EventProc {
 public:
     void Detected(Value* value_ptr) override {
-        if (!value_ptr) return;
+        if (value_ptr == nullptr) return;
         JsonWrapper doc;
         doc.AddItem("event", std::string("detected"));
         value_ptr->toJson(doc);
@@ -52,7 +75,7 @@ public:
     }
 
     void TrackingUpdate(Value* value_ptr) override {
-        if (!value_ptr) return;
+        if (value_ptr == nullptr) return;
         const uint32_t interval_ms = static_cast<uint32_t>(CONFIG_LD1125_TRACKING_INTERVAL_MS);
         static uint32_t last_ms = 0;
         const uint32_t now_ms = static_cast<uint32_t>(esp_timer_get_time() / 1000);
@@ -81,12 +104,9 @@ public:
 
 static void RadarTask(void* arg) {
     (void)arg;
-
     PrintEP event_processor;
-
     LD1125 ld1125(&event_processor, kUartPort);
     ld1125.verifyTestMode();
-
     DebounceRadar debounced(&ld1125, &event_processor, 1000);
 
     for (;;) {
@@ -96,6 +116,20 @@ static void RadarTask(void* arg) {
 }
 
 extern "C" void app_main(void) {
+    g_wifi_semaphore = xSemaphoreCreateBinary();
+
+    NvsStorageManager nvs_storage;
+    SettingsManager settings(nvs_storage);
+    ESP_LOGI(kTag, "Loaded settings: %s", settings.toJson().c_str());
+
+    WiFiManager wifi_manager(nvs_storage, LocalIpEventHandler, nullptr);
+    ESP_LOGI(kTag, "Waiting for WiFi IP...");
+    if (xSemaphoreTake(g_wifi_semaphore, portMAX_DELAY) != pdTRUE) {
+        ESP_LOGE(kTag, "Failed waiting for WiFi IP");
+    } else {
+        ESP_LOGI(kTag, "WiFi connected");
+    }
+
     esp_err_t esp_result;
 
     gpio_config_t vl_cfg;
@@ -131,8 +165,8 @@ extern "C" void app_main(void) {
     }
 
     apds9960_handle_t sensor = apds9960_create(bus_handle, kApdsAddr);
-    if (sensor == nullptr) {
-        ESP_LOGE(kTag, "apds9960_create failed");
+    if (!sensor) {
+        ESP_LOGI(kTag, "APDS9960 not detected");
         return;
     }
 
@@ -144,16 +178,12 @@ extern "C" void app_main(void) {
     }
 
     apds9960_set_timeout(sensor, 1000);
-
     if (apds9960_enable(sensor, true) != ESP_OK) {
         ESP_LOGE(kTag, "Enable power failed");
         return;
     }
-
     apds9960_set_adc_integration_time(sensor, 10);
     apds9960_set_ambient_light_gain(sensor, APDS9960_AGAIN_4X);
-    apds9960_enable_color_interrupt(sensor, false);
-
     if (apds9960_enable_color_engine(sensor, true) != ESP_OK) {
         ESP_LOGE(kTag, "Enable ALS failed");
         return;
@@ -187,7 +217,6 @@ extern "C" void app_main(void) {
     xTaskCreate(RadarTask, "radar_task", 4096, nullptr, 5, nullptr);
 
     ESP_LOGI(kTag, "Reading lux…");
-
     for (;;) {
         uint16_t red = 0;
         uint16_t green = 0;

@@ -5,7 +5,7 @@
   "idf.openOcdConfigs": [
     "board/esp32c3-ftdi.cfg"
   ],
-  "idf.port": "/dev/tty.usbmodem144101",
+  "idf.port": "/dev/tty.usbmodem142101",
   "idf.toolsPath": "/Users/robertfowler/.espressif",
   "idf.customExtraVars": {
     "IDF_TARGET": "esp32c3"

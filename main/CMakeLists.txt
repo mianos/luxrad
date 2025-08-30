@@ -3,4 +3,7 @@ idf_component_register(SRCS "main.cpp"
                     REQUIRES apds9960
                              ldradar
                              jsonwrapper
+                            button
+                            wifimanager
+                            nvsstoragemanager
                     INCLUDE_DIRS "")
