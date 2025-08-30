@@ -1,6 +1,9 @@
-idf_component_register(SRCS "main.cpp"
+idf_component_register(SRCS main.cpp
+                        MqttClient.cpp
                     PRIV_REQUIRES spi_flash
-                    REQUIRES apds9960
+                    REQUIRES
+							mqtt
+							apds9960
                              ldradar
                              jsonwrapper
                             button

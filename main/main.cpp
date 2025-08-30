@@ -6,6 +6,7 @@
 #include "esp_netif.h"
 #include "esp_event.h"
 #include "esp_timer.h"
+#include "esp_sntp.h"
 
 #include "driver/gpio.h"
 #include "driver/i2c_master.h"
@@ -28,6 +29,8 @@ extern "C" {
 #include "NvsStorageManager.h"
 #include "SettingsManager.h"
 #include "WifiManager.h"
+#include "MqttClient.h"
+#include "MqttEventProc.h"
 
 static const char* kTag = "apds9960_main";
 static const char* kRadarTag = "ld1125_main";
@@ -58,6 +61,63 @@ static void LocalIpEventHandler(void* handler_arg,
     }
 }
 
+// same SNTP helper you used before
+static void initialize_sntp(SettingsManager& settings) {
+    setenv("TZ", settings.tz.c_str(), 1);
+    tzset();
+    esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
+    esp_sntp_setservername(0, settings.ntpServer.c_str());
+    esp_sntp_init();
+    ESP_LOGI(kTag, "SNTP service initialized");
+    int max_retry = 200;
+    while (sntp_get_sync_status() == SNTP_SYNC_STATUS_RESET && max_retry--) {
+        vTaskDelay(100 / portTICK_PERIOD_MS);
+    }
+    if (max_retry <= 0) {
+        ESP_LOGE(kTag, "Failed to synchronize NTP time");
+        return;
+    }
+    time_t now = time(nullptr);
+    struct tm timeinfo;
+    localtime_r(&now, &timeinfo);
+    ESP_LOGI("TimeTest", "Current local time and date: %d-%d-%d %d:%d:%d",
+             1900 + timeinfo.tm_year, 1 + timeinfo.tm_mon, timeinfo.tm_mday,
+             timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
+}
+
+// same init publish pattern you already use elsewhere
+static void PublishMqttInit(MqttClient& client, SettingsManager& settings) {
+    JsonWrapper doc;
+    doc.AddItem("version", 4);
+    doc.AddItem("name", settings.sensorName);
+    doc.AddTime();
+    doc.AddTime(false, "gmt");
+
+    esp_netif_t* netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    if (!netif) {
+        ESP_LOGE("NET_INFO", "Network interface for STA not found");
+        return;
+    }
+    const char* hostname = nullptr;
+    esp_netif_get_hostname(netif, &hostname);
+    if (hostname) {
+        doc.AddItem("hostname", std::string(hostname));
+    }
+
+    esp_netif_ip_info_t ip_info;
+    if (esp_netif_get_ip_info(netif, &ip_info) == ESP_OK) {
+        char ip_str[16];
+        esp_ip4addr_ntoa(&ip_info.ip, ip_str, sizeof(ip_str));
+        doc.AddItem("ip", std::string(ip_str));
+    } else {
+        ESP_LOGE("NET_INFO", "Failed to get IP information");
+    }
+    doc.AddItem("settings", "cmnd/" + settings.sensorName + "/settings");
+
+    std::string status_topic = std::string("tele/") + settings.sensorName + "/init";
+    client.publish(status_topic, doc.ToString());
+}
+
 class PrintEP : public EventProc {
 public:
     void Detected(Value* value_ptr) override {
@@ -67,13 +127,11 @@ public:
         value_ptr->toJson(doc);
         ESP_LOGI(kRadarTag, "%s", doc.ToString().c_str());
     }
-
     void Cleared() override {
         JsonWrapper doc;
         doc.AddItem("event", std::string("cleared"));
         ESP_LOGI(kRadarTag, "%s", doc.ToString().c_str());
     }
-
     void TrackingUpdate(Value* value_ptr) override {
         if (value_ptr == nullptr) return;
         const uint32_t interval_ms = static_cast<uint32_t>(CONFIG_LD1125_TRACKING_INTERVAL_MS);
@@ -87,7 +145,6 @@ public:
             last_ms = now_ms;
         }
     }
-
     void PresenceUpdate(Value* value_ptr) override {
         const uint32_t interval_ms = static_cast<uint32_t>(CONFIG_LD1125_PRESENCE_INTERVAL_MS);
         static uint32_t last_ms = 0;
@@ -102,12 +159,36 @@ public:
     }
 };
 
+// publish to both your logger and MQTT without changing your logger
+class CombinedEP : public EventProc {
+public:
+    CombinedEP(EventProc* ep_a_in, EventProc* ep_b_in) : ep_a(ep_a_in), ep_b(ep_b_in) {}
+    void Detected(Value* value_ptr) override {
+        if (ep_a) ep_a->Detected(value_ptr);
+        if (ep_b) ep_b->Detected(value_ptr);
+    }
+    void Cleared() override {
+        if (ep_a) ep_a->Cleared();
+        if (ep_b) ep_b->Cleared();
+    }
+    void TrackingUpdate(Value* value_ptr) override {
+        if (ep_a) ep_a->TrackingUpdate(value_ptr);
+        if (ep_b) ep_b->TrackingUpdate(value_ptr);
+    }
+    void PresenceUpdate(Value* value_ptr) override {
+        if (ep_a) ep_a->PresenceUpdate(value_ptr);
+        if (ep_b) ep_b->PresenceUpdate(value_ptr);
+    }
+private:
+    EventProc* ep_a;
+    EventProc* ep_b;
+};
+
 static void RadarTask(void* arg) {
-    (void)arg;
-    PrintEP event_processor;
-    LD1125 ld1125(&event_processor, kUartPort);
+    auto* combined = static_cast<CombinedEP*>(arg);
+    LD1125 ld1125(combined, kUartPort);
     ld1125.verifyTestMode();
-    DebounceRadar debounced(&ld1125, &event_processor, 1000);
+    DebounceRadar debounced(&ld1125, combined, 1000);
 
     for (;;) {
         debounced.process(0.0f);
@@ -129,6 +210,17 @@ extern "C" void app_main(void) {
     } else {
         ESP_LOGI(kTag, "WiFi connected");
     }
+
+    // MQTT bring-up and init publish
+    MqttClient mqtt_client(settings);
+    mqtt_client.start();
+    PublishMqttInit(mqtt_client, settings);
+    initialize_sntp(settings);
+
+    // wire your existing logger with an MQTT publisher
+    PrintEP print_ep;
+    MqttEventProc mqtt_ep(settings, mqtt_client);
+    CombinedEP combined_ep(&print_ep, &mqtt_ep);
 
     esp_err_t esp_result;
 
@@ -214,7 +306,7 @@ extern "C" void app_main(void) {
         return;
     }
 
-    xTaskCreate(RadarTask, "radar_task", 4096, nullptr, 5, nullptr);
+    xTaskCreate(RadarTask, "radar_task", 4096, &combined_ep, 5, nullptr);
 
     ESP_LOGI(kTag, "Reading lux…");
     for (;;) {
@@ -235,7 +327,17 @@ extern "C" void app_main(void) {
         }
 
         float lux = apds9960_calc_lux_from_rgb(red, green, blue);
-        ESP_LOGI(kTag, "R:%u G:%u B:%u C:%u  Lux:%.2f", red, green, blue, clear_ch, lux);
+        ESP_LOGI(kTag, "R:%u G:%u B:%u  C:%u  Lux:%.2f", red, green, blue, clear_ch, lux);
+
+        // publish lux to MQTT
+        JsonWrapper lux_doc;
+        lux_doc.AddItem("red", static_cast<int>(red));
+        lux_doc.AddItem("green", static_cast<int>(green));
+        lux_doc.AddItem("blue", static_cast<int>(blue));
+        lux_doc.AddItem("clear", static_cast<int>(clear_ch));
+        lux_doc.AddItem("lux", lux);
+        lux_doc.AddTime();
+        mqtt_client.publish("tele/" + settings.sensorName + "/lux", lux_doc.ToString());
 
         vTaskDelay(pdMS_TO_TICKS(300));
     }
