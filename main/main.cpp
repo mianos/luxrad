@@ -1,12 +1,26 @@
+// ldr3 — ESP32-C3 presence sensor on ESP-IDF v6.
+//
+// An LD1125 mmWave radar (UART) reports presence/tracking and an APDS9960
+// ambient-light sensor (I2C) reports lux, both published over MQTT. Settings
+// live in NVS and are adjustable over MQTT (cmnd/<name>/settings) and HTTP
+// (/config). A web server exposes /healthz, /config and OTA (/firmware) with
+// rollback verification. Shared infrastructure (wifimanager, mqttwrapper,
+// webserver, jsonwrapper, nvsstoragemanager) comes from the mianesp components.
+
+#include <atomic>
 #include <cstring>
-#include <cstdio>
+#include <ctime>
+#include <regex>
+#include <string>
 
 #include "esp_err.h"
 #include "esp_log.h"
+#include "esp_system.h"
 #include "esp_netif.h"
 #include "esp_event.h"
 #include "esp_timer.h"
 #include "esp_sntp.h"
+#include "esp_ota_ops.h"
 
 #include "driver/gpio.h"
 #include "driver/i2c_master.h"
@@ -24,92 +38,85 @@ extern "C" {
 #include "DebounceRadar.h"
 #include "RadarSensor.h"
 #include "Events.h"
-#include "JsonWrapper.h"
 
+#include "JsonWrapper.h"
 #include "NvsStorageManager.h"
-#include "SettingsManager.h"
+#include "Settings.h"
 #include "WifiManager.h"
 #include "MqttClient.h"
 #include "MqttEventProc.h"
+#include "WebServer.h"
+#include "LdrWebServer.h"
 
-static const char* kTag = "apds9960_main";
+static const char* kTag = "ldr3";
 static const char* kRadarTag = "ld1125_main";
 
 static constexpr gpio_num_t kPinScl = GPIO_NUM_7;
 static constexpr gpio_num_t kPinSda = GPIO_NUM_6;
 static constexpr gpio_num_t kPinVl  = GPIO_NUM_21;
 
-static constexpr int kI2cFreqHz = 400000;
 static constexpr uint8_t kApdsAddr = APDS9960_I2C_ADDRESS;
 
 static constexpr uart_port_t kUartPort = UART_NUM_1;
 static constexpr gpio_num_t   kUartTx  = GPIO_NUM_3;
 static constexpr gpio_num_t   kUartRx  = GPIO_NUM_2;
 
-static SemaphoreHandle_t g_wifi_semaphore = nullptr;
+static std::atomic<float> g_last_lux{-1.0f};
 
-static void LocalIpEventHandler(void* handler_arg,
-                                esp_event_base_t event_base,
-                                int32_t event_id,
-                                void* event_data) {
-    (void)handler_arg;
-    (void)event_data;
-    if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
-        if (g_wifi_semaphore != nullptr) {
-            xSemaphoreGive(g_wifi_semaphore);
-        }
-    }
+namespace {
+
+struct App {
+    Settings*    settings;
+    MqttClient*  mqtt;
+    WiFiManager* wifi;
+};
+
+std::string uptimeString() {
+    uint32_t seconds = (uint32_t)(esp_timer_get_time() / 1000000ULL);
+    uint32_t days = seconds / 86400; seconds %= 86400;
+    uint32_t hours = seconds / 3600; seconds %= 3600;
+    uint32_t minutes = seconds / 60;
+    return std::to_string(days) + "d " + std::to_string(hours) + "h " +
+           std::to_string(minutes) + "m";
 }
 
-// same SNTP helper you used before
-static void initialize_sntp(SettingsManager& settings) {
-    setenv("TZ", settings.tz.c_str(), 1);
-    tzset();
-    esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
-    esp_sntp_setservername(0, settings.ntpServer.c_str());
-    esp_sntp_init();
-    int max_retry = 200;
-    while (sntp_get_sync_status() == SNTP_SYNC_STATUS_RESET && max_retry--) {
-        vTaskDelay(100 / portTICK_PERIOD_MS);
-    }
-    if (max_retry <= 0) {
-        ESP_LOGE(kTag, "Failed to synchronize NTP time");
-        return;
-    }
-}
-
-// same init publish pattern you already use elsewhere
-static void PublishMqttInit(MqttClient& client, SettingsManager& settings) {
-    JsonWrapper doc;
-    doc.AddItem("version", 4);
-    doc.AddItem("name", settings.sensorName);
-    doc.AddTime();
-    doc.AddTime(false, "gmt");
-
+std::string localIp() {
+    char buf[16] = "0.0.0.0";
     esp_netif_t* netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
-    if (!netif) {
-        ESP_LOGE("NET_INFO", "Network interface for STA not found");
-        return;
+    esp_netif_ip_info_t ip;
+    if (netif && esp_netif_get_ip_info(netif, &ip) == ESP_OK) {
+        esp_ip4addr_ntoa(&ip.ip, buf, sizeof(buf));
     }
-    const char* hostname = nullptr;
-    esp_netif_get_hostname(netif, &hostname);
-    if (hostname) {
-        doc.AddItem("hostname", std::string(hostname));
-    }
-
-    esp_netif_ip_info_t ip_info;
-    if (esp_netif_get_ip_info(netif, &ip_info) == ESP_OK) {
-        char ip_str[16];
-        esp_ip4addr_ntoa(&ip_info.ip, ip_str, sizeof(ip_str));
-        doc.AddItem("ip", std::string(ip_str));
-    } else {
-        ESP_LOGE("NET_INFO", "Failed to get IP information");
-    }
-    doc.AddItem("settings", "cmnd/" + settings.sensorName + "/settings");
-
-    std::string status_topic = std::string("tele/") + settings.sensorName + "/init";
-    client.publish(status_topic, doc.ToString());
+    return std::string(buf);
 }
+
+// ---- MQTT command handlers (cmnd/<name>/<cmd>) ----
+
+esp_err_t handleSettings(MqttClient* client, const std::string& topic,
+                         const JsonWrapper& d, void* ctx) {
+    auto* app = static_cast<App*>(ctx);
+    auto changes = app->settings->loadFromJson(d);
+    app->settings->save();
+    app->settings->log();
+    std::string ack = Settings::changesToJson(changes);
+    client->publish("tele/" + app->settings->sensorName + "/settingsack", ack);
+    ESP_LOGI(kTag, "applied settings for %s: %s", topic.c_str(), ack.c_str());
+    return ESP_OK;
+}
+
+esp_err_t handleRestart(MqttClient*, const std::string&, const JsonWrapper&, void*) {
+    ESP_LOGW(kTag, "restart requested");
+    esp_restart();
+    return ESP_OK;
+}
+
+esp_err_t handleReprovision(MqttClient*, const std::string&, const JsonWrapper&, void* ctx) {
+    ESP_LOGW(kTag, "reprovision requested");
+    static_cast<App*>(ctx)->wifi->clear();  // clears Wi-Fi creds and restarts
+    return ESP_OK;
+}
+
+// ---- Radar event sinks ----
 
 class PrintEP : public EventProc {
 public:
@@ -152,7 +159,7 @@ public:
     }
 };
 
-// publish to both your logger and MQTT without changing your logger
+// Fan an event out to both the console logger and the MQTT publisher.
 class CombinedEP : public EventProc {
 public:
     CombinedEP(EventProc* ep_a_in, EventProc* ep_b_in) : ep_a(ep_a_in), ep_b(ep_b_in) {}
@@ -177,56 +184,132 @@ private:
     EventProc* ep_b;
 };
 
-static void RadarTask(void* arg) {
+void radarTask(void* arg) {
     auto* combined = static_cast<CombinedEP*>(arg);
     LD1125 ld1125(combined, kUartPort);
     ld1125.verifyTestMode();
     DebounceRadar debounced(&ld1125, combined, 1000);
-
     for (;;) {
         debounced.process(0.0f);
         vTaskDelay(pdMS_TO_TICKS(20));
     }
 }
 
-extern "C" void app_main(void) {
-    // Silence info-level logs globally; leave warnings/errors visible
-    esp_log_level_set("*", ESP_LOG_WARN);
+// Periodic ambient-light publishing. Owns the APDS9960 handle (may be null if
+// the sensor is absent — radar then runs alone).
+struct LuxCtx {
+    apds9960_handle_t sensor;
+    Settings*         settings;
+    MqttClient*       mqtt;
+};
 
-    g_wifi_semaphore = xSemaphoreCreateBinary();
+void luxTask(void* arg) {
+    auto* ctx = static_cast<LuxCtx*>(arg);
+    uint32_t last_ms = 0;
+    for (;;) {
+        const uint32_t now_ms = static_cast<uint32_t>(esp_timer_get_time() / 1000);
+        const int period_sec = ctx->settings->luxPeriodSec;
 
-    NvsStorageManager nvs_storage;
-    SettingsManager settings(nvs_storage);
+        if (ctx->sensor && period_sec > 0 &&
+            (last_ms == 0 || now_ms - last_ms >= static_cast<uint32_t>(period_sec) * 1000U)) {
+            uint16_t red = 0, green = 0, blue = 0, clear_ch = 0;
+            if (apds9960_color_data_ready(ctx->sensor) &&
+                apds9960_get_color_data(ctx->sensor, &red, &green, &blue, &clear_ch) == ESP_OK) {
+                float lux = apds9960_calc_lux_from_rgb(red, green, blue);
+                g_last_lux.store(lux, std::memory_order_relaxed);
 
-    WiFiManager wifi_manager(nvs_storage, LocalIpEventHandler, nullptr);
-    (void)xSemaphoreTake(g_wifi_semaphore, portMAX_DELAY);
+                JsonWrapper doc;
+                doc.AddItem("red", static_cast<int>(red));
+                doc.AddItem("green", static_cast<int>(green));
+                doc.AddItem("blue", static_cast<int>(blue));
+                doc.AddItem("clear", static_cast<int>(clear_ch));
+                doc.AddItem("lux", lux);
+                doc.AddTime();
+                ctx->mqtt->publish("tele/" + ctx->settings->sensorName + "/lux", doc.ToString());
+            }
+            last_ms = now_ms;
+        }
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+}
 
-    // MQTT bring-up and init publish
-    MqttClient mqtt_client(settings);
-    mqtt_client.start();
-    PublishMqttInit(mqtt_client, settings);
-    initialize_sntp(settings);
+void telemetryTask(void* arg) {
+    auto* app = static_cast<App*>(arg);
+    const std::string base = "tele/" + app->settings->sensorName + "/";
 
-    // wire your existing logger with an MQTT publisher
-    PrintEP print_ep;
-    MqttEventProc mqtt_ep(settings, mqtt_client);
-    CombinedEP combined_ep(&print_ep, &mqtt_ep);
+    // Wait (bounded) for SNTP so the init timestamp is real.
+    for (int i = 0; i < 20 && time(nullptr) < 1700000000; ++i) {
+        vTaskDelay(pdMS_TO_TICKS(500));
+    }
 
-    esp_err_t esp_result;
+    JsonWrapper init;
+    init.AddItem("version", 5);
+    init.AddTime();
+    init.AddTime(false, "gmt");
+    init.AddItem("hostname", app->settings->sensorName);
+    init.AddItem("ip", localIp());
+    init.AddItem("settings", "cmnd/" + app->settings->sensorName + "/settings");
+    app->mqtt->publish(base + "init", init.ToString());
 
+    for (;;) {
+        vTaskDelay(pdMS_TO_TICKS(60000));
+        JsonWrapper d;
+        d.AddTime();
+        d.AddItem("uptime", uptimeString());
+        d.AddItem("heap_free", (int)esp_get_free_heap_size());
+        d.AddItem("heap_min_free", (int)esp_get_minimum_free_heap_size());
+        app->mqtt->publish(base + "status", d.ToString());
+    }
+}
+
+// --- OTA rollback verification ---
+//
+// A freshly-OTA'd image boots in PENDING_VERIFY: the bootloader rolls it back
+// to the previous slot on the next reset unless the running app declares itself
+// good. We declare it good only once the device is back on the network, so an
+// image that boots but can't reach Wi-Fi is rolled back instead of stranding an
+// unreachable device. A wired first-flash is UNDEFINED, so this never touches
+// normal/bench boots.
+constexpr int OTA_VERIFY_TIMEOUT_MS = 120000;
+SemaphoreHandle_t s_got_ip = nullptr;
+
+void onGotIp(void*, esp_event_base_t base, int32_t id, void*) {
+    if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP && s_got_ip) {
+        xSemaphoreGive(s_got_ip);
+    }
+}
+
+void otaVerifyTask(void*) {
+    const esp_partition_t* running = esp_ota_get_running_partition();
+    esp_ota_img_states_t state;
+    if (esp_ota_get_state_partition(running, &state) == ESP_OK &&
+        state == ESP_OTA_IMG_PENDING_VERIFY) {
+        ESP_LOGW(kTag, "OTA: image pending verify; waiting up to %ds for connectivity",
+                 OTA_VERIFY_TIMEOUT_MS / 1000);
+        if (xSemaphoreTake(s_got_ip, pdMS_TO_TICKS(OTA_VERIFY_TIMEOUT_MS)) == pdTRUE) {
+            esp_ota_mark_app_valid_cancel_rollback();
+            ESP_LOGI(kTag, "OTA: connectivity confirmed, image marked valid");
+        } else {
+            ESP_LOGE(kTag, "OTA: no IP within timeout; rolling back to previous image");
+            esp_ota_mark_app_invalid_rollback_and_reboot();  // reboots on success
+            ESP_LOGE(kTag, "OTA: rollback not possible; keeping current image");
+            esp_ota_mark_app_valid_cancel_rollback();
+        }
+    }
+    vTaskDelete(nullptr);
+}
+
+// Configure the VL gating pin, bring up the I2C bus and the APDS9960. Returns
+// null (and logs) if the sensor is absent; radar keeps running regardless.
+apds9960_handle_t setupLightSensor() {
     gpio_config_t vl_cfg;
     std::memset(&vl_cfg, 0, sizeof(vl_cfg));
     vl_cfg.pin_bit_mask = (1ULL << static_cast<uint32_t>(kPinVl));
     vl_cfg.mode = GPIO_MODE_OUTPUT;
-    vl_cfg.intr_type = GPIO_INTR_DISABLE;
-    vl_cfg.pull_down_en = GPIO_PULLDOWN_DISABLE;
-    vl_cfg.pull_up_en = GPIO_PULLUP_DISABLE;
-    esp_result = gpio_config(&vl_cfg);
-    if (esp_result != ESP_OK) {
-        ESP_LOGE(kTag, "gpio_config(VL) failed: %s", esp_err_to_name(esp_result));
-        return;
+    if (gpio_config(&vl_cfg) != ESP_OK) {
+        ESP_LOGE(kTag, "gpio_config(VL) failed");
+        return nullptr;
     }
-
     gpio_set_level(kPinVl, 1);
     vTaskDelay(pdMS_TO_TICKS(10));
 
@@ -240,34 +323,36 @@ extern "C" void app_main(void) {
     bus_cfg.flags.enable_internal_pullup = 1;
 
     i2c_master_bus_handle_t bus_handle = nullptr;
-    esp_result = i2c_new_master_bus(&bus_cfg, &bus_handle);
-    if (esp_result != ESP_OK) {
-        ESP_LOGE(kTag, "i2c_new_master_bus failed: %s", esp_err_to_name(esp_result));
-        return;
+    if (i2c_new_master_bus(&bus_cfg, &bus_handle) != ESP_OK) {
+        ESP_LOGE(kTag, "i2c_new_master_bus failed");
+        return nullptr;
     }
 
     apds9960_handle_t sensor = apds9960_create(bus_handle, kApdsAddr);
     if (!sensor) {
-        // keep running radar even if color sensor is missing
-        sensor = nullptr;
-    } else {
-        uint8_t device_id = 0;
-        if (apds9960_get_deviceid(sensor, &device_id) != ESP_OK) {
-            ESP_LOGW(kTag, "Failed to read APDS9960 device ID");
-        }
-        apds9960_set_timeout(sensor, 1000);
-        if (apds9960_enable(sensor, true) != ESP_OK) {
-            ESP_LOGE(kTag, "Enable power failed");
-            return;
-        }
-        apds9960_set_adc_integration_time(sensor, 10);
-        apds9960_set_ambient_light_gain(sensor, APDS9960_AGAIN_4X);
-        if (apds9960_enable_color_engine(sensor, true) != ESP_OK) {
-            ESP_LOGE(kTag, "Enable ALS failed");
-            return;
-        }
+        ESP_LOGW(kTag, "APDS9960 not found; lux disabled");
+        return nullptr;
     }
+    uint8_t device_id = 0;
+    if (apds9960_get_deviceid(sensor, &device_id) != ESP_OK) {
+        ESP_LOGW(kTag, "Failed to read APDS9960 device ID");
+    }
+    apds9960_set_timeout(sensor, 1000);
+    if (apds9960_enable(sensor, true) != ESP_OK) {
+        ESP_LOGE(kTag, "APDS9960 enable power failed");
+        return nullptr;
+    }
+    apds9960_set_adc_integration_time(sensor, 10);
+    apds9960_set_ambient_light_gain(sensor, APDS9960_AGAIN_4X);
+    if (apds9960_enable_color_engine(sensor, true) != ESP_OK) {
+        ESP_LOGE(kTag, "APDS9960 enable ALS failed");
+        return nullptr;
+    }
+    return sensor;
+}
 
+// Bring up UART1 for the LD1125 radar. Returns false on failure.
+bool setupRadarUart() {
     uart_config_t uart_cfg;
     std::memset(&uart_cfg, 0, sizeof(uart_cfg));
     uart_cfg.baud_rate  = 115200;
@@ -277,55 +362,99 @@ extern "C" void app_main(void) {
     uart_cfg.flow_ctrl  = UART_HW_FLOWCTRL_DISABLE;
     uart_cfg.source_clk = UART_SCLK_DEFAULT;
 
-    esp_result = uart_param_config(kUartPort, &uart_cfg);
-    if (esp_result != ESP_OK) {
-        ESP_LOGE(kRadarTag, "uart_param_config failed: %s", esp_err_to_name(esp_result));
-        return;
+    if (uart_param_config(kUartPort, &uart_cfg) != ESP_OK) {
+        ESP_LOGE(kRadarTag, "uart_param_config failed");
+        return false;
     }
-    esp_result = uart_set_pin(kUartPort, kUartTx, kUartRx, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
-    if (esp_result != ESP_OK) {
-        ESP_LOGE(kRadarTag, "uart_set_pin failed: %s", esp_err_to_name(esp_result));
-        return;
+    if (uart_set_pin(kUartPort, kUartTx, kUartRx, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE) != ESP_OK) {
+        ESP_LOGE(kRadarTag, "uart_set_pin failed");
+        return false;
     }
-    esp_result = uart_driver_install(kUartPort, 2048, 0, 0, nullptr, 0);
-    if (esp_result != ESP_OK) {
-        ESP_LOGE(kRadarTag, "uart_driver_install failed: %s", esp_err_to_name(esp_result));
-        return;
+    if (uart_driver_install(kUartPort, 2048, 0, 0, nullptr, 0) != ESP_OK) {
+        ESP_LOGE(kRadarTag, "uart_driver_install failed");
+        return false;
     }
-
-    xTaskCreate(RadarTask, "radar_task", 4096, &combined_ep, 5, nullptr);
-
-    // periodic lux publishing to MQTT without console noise
-    uint32_t last_lux_ms = 0;
-    for (;;) {
-        const uint32_t now_ms = static_cast<uint32_t>(esp_timer_get_time() / 1000);
-        const int period_sec = settings.luxPeriodSec;
-
-        if (sensor && period_sec > 0 &&
-            (last_lux_ms == 0 || now_ms - last_lux_ms >= static_cast<uint32_t>(period_sec) * 1000U)) {
-            uint16_t red = 0;
-            uint16_t green = 0;
-            uint16_t blue = 0;
-            uint16_t clear_ch = 0;
-
-            if (apds9960_color_data_ready(sensor)) {
-                if (apds9960_get_color_data(sensor, &red, &green, &blue, &clear_ch) == ESP_OK) {
-                    float lux = apds9960_calc_lux_from_rgb(red, green, blue);
-
-                    JsonWrapper lux_doc;
-                    lux_doc.AddItem("red", static_cast<int>(red));
-                    lux_doc.AddItem("green", static_cast<int>(green));
-                    lux_doc.AddItem("blue", static_cast<int>(blue));
-                    lux_doc.AddItem("clear", static_cast<int>(clear_ch));
-                    lux_doc.AddItem("lux", lux);
-                    lux_doc.AddTime();
-                    mqtt_client.publish("tele/" + settings.sensorName + "/lux", lux_doc.ToString());
-                }
-            }
-            last_lux_ms = now_ms;
-        }
-
-        vTaskDelay(pdMS_TO_TICKS(50));
-    }
+    return true;
 }
 
+}  // namespace
+
+extern "C" void app_main(void) {
+    // Silence info-level logs globally (keeps the per-event radar/lux JSON
+    // prints quiet) but keep network bring-up visible so Wi-Fi association and
+    // provisioning state can be seen.
+    esp_log_level_set("*", ESP_LOG_WARN);
+    esp_log_level_set("WiFiManager", ESP_LOG_INFO);
+    esp_log_level_set("wifi", ESP_LOG_INFO);
+    esp_log_level_set("esp_netif_handlers", ESP_LOG_INFO);  // prints "sta ip: ..."
+    esp_log_level_set("MqttClient", ESP_LOG_INFO);
+
+    static NvsStorageManager nvs;
+    static Settings settings(nvs);
+    settings.log();
+
+    // Created before Wi-Fi starts so the got-IP handler can signal it.
+    s_got_ip = xSemaphoreCreateBinary();
+
+    // Wi-Fi: provisions (ESP-Touch v2) on first boot, else reconnects. onGotIp
+    // feeds OTA rollback verification; publishes queue until MQTT connects.
+    static WiFiManager wifi(nvs, onGotIp, nullptr);
+    std::string host = settings.sensorName;
+    wifi.configSetHostName(host);
+
+    // NTP time in the configured timezone.
+    setenv("TZ", settings.tz.c_str(), 1);
+    tzset();
+    esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
+    esp_sntp_setservername(0, settings.ntpServer.c_str());
+    esp_sntp_init();
+
+    // MQTT (plain mqtt://, optional creds, Last-Will on the status topic).
+    static std::string statusTopic = "tele/" + settings.sensorName + "/status";
+    static std::string lwt = "{\"status\":\"offline\"}";
+    static esp_mqtt_client_config_t mcfg = {};
+    mcfg.broker.address.uri                  = settings.mqttBrokerUri.c_str();
+    mcfg.credentials.client_id               = settings.sensorName.c_str();
+    mcfg.credentials.username                = settings.mqttUserName.c_str();
+    mcfg.credentials.authentication.password = settings.mqttUserPassword.c_str();
+    mcfg.session.last_will.topic             = statusTopic.c_str();
+    mcfg.session.last_will.msg               = lwt.c_str();
+    mcfg.session.last_will.msg_len           = (int)lwt.size();
+    mcfg.session.last_will.qos               = 1;
+    static MqttClient mqtt(mcfg, settings.sensorName);
+
+    static App app{ &settings, &mqtt, &wifi };
+
+    const std::string b = "cmnd/" + settings.sensorName + "/";
+    mqtt.registerHandler(b + "settings",    std::regex(b + "settings"),    handleSettings,    &app);
+    mqtt.registerHandler(b + "restart",     std::regex(b + "restart"),     handleRestart,     &app);
+    mqtt.registerHandler(b + "reprovision", std::regex(b + "reprovision"), handleReprovision, &app);
+    mqtt.start();
+
+    // Web server: base /healthz, /reset, /set_hostname plus /config and OTA.
+    static WebContext webctx(&wifi);
+    static LdrWebServer web(&webctx, settings, g_last_lux);
+    web.start();
+
+    // OTA: verify a freshly-OTA'd image once it's back online; roll back if not.
+    xTaskCreate(otaVerifyTask, "ota_verify", 4096, nullptr, 4, nullptr);
+
+    // Radar -> console + MQTT.
+    static PrintEP print_ep;
+    static MqttEventProc mqtt_ep(settings, mqtt, g_last_lux);
+    static CombinedEP combined_ep(&print_ep, &mqtt_ep);
+
+    apds9960_handle_t sensor = setupLightSensor();
+    static LuxCtx lux_ctx{ sensor, &settings, &mqtt };
+
+    if (!setupRadarUart()) {
+        ESP_LOGE(kRadarTag, "radar UART init failed; radar disabled");
+    } else {
+        xTaskCreate(radarTask, "radar", 4096, &combined_ep, 5, nullptr);
+    }
+
+    xTaskCreate(luxTask, "lux", 4096, &lux_ctx, 4, nullptr);
+    xTaskCreate(telemetryTask, "telemetry", 4096, &app, 4, nullptr);
+
+    ESP_LOGI(kTag, "ldr3 started");
+}
