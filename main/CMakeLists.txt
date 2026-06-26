@@ -1,12 +1,23 @@
-idf_component_register(SRCS main.cpp
-                        MqttClient.cpp
-                    PRIV_REQUIRES spi_flash
-                    REQUIRES
-							mqtt
-							apds9960
-                             ldradar
-                             jsonwrapper
-                            button
-                            wifimanager
-                            nvsstoragemanager
-                    INCLUDE_DIRS "")
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+idf_component_register(SRCS "main.cpp" "LdrWebServer.cpp"
+                       INCLUDE_DIRS "."
+                       REQUIRES
+                         nvsstoragemanager
+                         wifimanager
+                         settings
+                         mqttwrapper
+                         webserver
+                         ldradar
+                         apds9960
+                         jsonwrapper
+                         espressif__mqtt
+                         esp_netif
+                         esp_event
+                         nvs_flash
+                         app_update
+                         esp_timer
+                         esp_driver_uart
+                         esp_driver_gpio
+                         esp_driver_i2c)
