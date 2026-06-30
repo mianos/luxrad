@@ -133,7 +133,9 @@ void luxTask(void* arg) {
                 doc.AddItem("clear", static_cast<int>(clear_ch));
                 doc.AddItem("lux", lux);
                 doc.AddTime();
-                ctx->mqtt->publish("tele/" + ctx->settings->sensorName + "/lux", doc.ToString());
+                const std::string topic = "tele/" + ctx->settings->sensorName + "/lux";
+                ctx->mqtt->publish(topic, doc.ToString());
+                ESP_LOGI(kTag, "published %s lux=%.1f", topic.c_str(), lux);
             }
             last_ms = now_ms;
         }
@@ -266,6 +268,7 @@ extern "C" void app_main(void) {
     // quiet) but keep network bring-up visible so Wi-Fi association and
     // provisioning state can be seen.
     esp_log_level_set("*", ESP_LOG_WARN);
+    esp_log_level_set("ldr3", ESP_LOG_INFO);  // publish topic + lux value
     esp_log_level_set("WiFiManager", ESP_LOG_INFO);
     esp_log_level_set("wifi", ESP_LOG_INFO);
     esp_log_level_set("esp_netif_handlers", ESP_LOG_INFO);  // prints "sta ip: ..."
