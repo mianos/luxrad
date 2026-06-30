@@ -114,7 +114,20 @@ struct LuxCtx {
 void luxTask(void* arg) {
     auto* ctx = static_cast<LuxCtx*>(arg);
     uint32_t last_ms = 0;
+    int applied_integration_ms = -1;  // forces an apply on the first iteration
     for (;;) {
+        // Apply the configured ADC integration time, picking up live changes
+        // made over MQTT (cmnd/<name>/settings) or HTTP (/config). The driver
+        // clamps the register, so out-of-range values are harmless.
+        if (ctx->sensor) {
+            const int want = ctx->settings->luxIntegrationMs;
+            if (want > 0 && want != applied_integration_ms) {
+                apds9960_set_adc_integration_time(ctx->sensor, static_cast<uint16_t>(want));
+                applied_integration_ms = want;
+                ESP_LOGI(kTag, "APDS9960 integration time set to %d ms", want);
+            }
+        }
+
         const uint32_t now_ms = static_cast<uint32_t>(esp_timer_get_time() / 1000);
         const int period_sec = ctx->settings->luxPeriodSec;
 
@@ -252,7 +265,8 @@ apds9960_handle_t setupLightSensor() {
         ESP_LOGE(kTag, "APDS9960 enable power failed");
         return nullptr;
     }
-    apds9960_set_adc_integration_time(sensor, 10);
+    // Integration time is owned by luxTask (applies settings.luxIntegrationMs and
+    // honours live changes); gain stays fixed at 4x.
     apds9960_set_ambient_light_gain(sensor, APDS9960_AGAIN_4X);
     if (apds9960_enable_color_engine(sensor, true) != ESP_OK) {
         ESP_LOGE(kTag, "APDS9960 enable ALS failed");

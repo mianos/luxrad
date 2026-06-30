@@ -22,6 +22,8 @@ public:
     std::string tz               = "AEST-10AEDT,M10.1.0,M4.1.0/3";
     std::string ntpServer        = "time.google.com";
     int         luxPeriodSec     = 60;  // ambient-light publish period in seconds; <=0 disables
+    int         luxIntegrationMs = 100; // APDS9960 ADC integration time (ms); longer = finer
+                                        // resolution but saturates sooner in bright light
 
     // (key, new-value) pairs for every field that changed in the last apply.
     using ChangeList = std::vector<std::pair<std::string, std::string>>;

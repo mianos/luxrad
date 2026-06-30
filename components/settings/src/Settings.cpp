@@ -49,6 +49,7 @@ Settings::ChangeList Settings::loadFromJson(const JsonWrapper& doc) {
     apply(doc, "tz",                tz,                changes);
     apply(doc, "ntpServer",         ntpServer,         changes);
     apply(doc, "luxPeriodSec",      luxPeriodSec,      changes);
+    apply(doc, "luxIntegrationMs",  luxIntegrationMs,  changes);
     return changes;
 }
 
@@ -61,6 +62,7 @@ JsonWrapper Settings::toJson() const {
     d.AddItem("tz",                tz);
     d.AddItem("ntpServer",         ntpServer);
     d.AddItem("luxPeriodSec",      luxPeriodSec);
+    d.AddItem("luxIntegrationMs",  luxIntegrationMs);
     return d;
 }
 
@@ -82,12 +84,13 @@ void Settings::resetToDefaults() {
     tz                = defaults.tz;
     ntpServer         = defaults.ntpServer;
     luxPeriodSec      = defaults.luxPeriodSec;
+    luxIntegrationMs  = defaults.luxIntegrationMs;
 }
 
 void Settings::log() const {
-    ESP_LOGI(TAG, "broker=%s user=%s name=%s tz=%s ntp=%s luxPeriod=%d",
+    ESP_LOGI(TAG, "broker=%s user=%s name=%s tz=%s ntp=%s luxPeriod=%d luxIntegrationMs=%d",
              mqttBrokerUri.c_str(), mqttUserName.c_str(), sensorName.c_str(),
-             tz.c_str(), ntpServer.c_str(), luxPeriodSec);
+             tz.c_str(), ntpServer.c_str(), luxPeriodSec, luxIntegrationMs);
 }
 
 std::string Settings::changesToJson(const ChangeList& changes) {

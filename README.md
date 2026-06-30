@@ -51,6 +51,8 @@ Commands (`cmnd/<name>/…`): `settings`, `restart`, `reprovision`.
 
 ```
 mosquitto_pub -h mqtt2.mianos.com -t cmnd/ldr/settings -m '{"luxPeriodSec":30}'
+# longer ADC integration -> finer lux resolution (saturates sooner in bright light)
+mosquitto_pub -h mqtt2.mianos.com -t cmnd/ldr/settings -m '{"luxIntegrationMs":178}'
 ```
 
 ## HTTP
