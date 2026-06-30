@@ -51,17 +51,26 @@ Commands (`cmnd/<name>/…`): `settings`, `restart`, `reprovision`.
 
 The `lux` payload carries the raw `red`/`green`/`blue`/`clear` channel counts plus:
 
-* `raw` — un-normalised illuminance index. Scales with `luxIntegrationMs`, so it
-  is a bigger number with finer resolution at longer integration; not comparable
-  across integration-time changes.
-* `lux` — `raw` normalised to a 100 ms reference, so it tracks actual brightness
-  and stays stable when `luxIntegrationMs` changes. Use this for thresholds.
+* `raw` — un-normalised illuminance index. Scales with `luxIntegrationMs` and
+  `luxGain`, so it is a bigger number with finer resolution at longer integration
+  / higher gain; not comparable across integration-time or gain changes.
+* `lux` — `raw` normalised to a 100 ms / 4x reference, so it tracks actual
+  brightness and stays stable when `luxIntegrationMs` / `luxGain` change. Use this
+  for thresholds.
+* `cct` — correlated colour temperature (K). A ratio of channels, so it is
+  independent of integration time and gain.
+* `integrationMs`, `gain` — the ADC integration time and ALS gain the sample was
+  taken at.
+
+Tuning (all live, no reflash):
 
 ```
 mosquitto_pub -h mqtt2.mianos.com -t cmnd/ldr/settings -m '{"luxPeriodSec":30}'
 # longer ADC integration -> finer resolution (saturates sooner in bright light).
 # raw scales with this; lux stays stable.
 mosquitto_pub -h mqtt2.mianos.com -t cmnd/ldr/settings -m '{"luxIntegrationMs":712}'
+# ALS gain 1/4/16/64 -> more low-light sensitivity; raw scales, lux stays stable.
+mosquitto_pub -h mqtt2.mianos.com -t cmnd/ldr/settings -m '{"luxGain":16}'
 ```
 
 ## HTTP

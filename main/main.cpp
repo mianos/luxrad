@@ -48,11 +48,12 @@ static constexpr gpio_num_t kPinVl  = GPIO_NUM_21;
 
 static constexpr uint8_t kApdsAddr = APDS9960_I2C_ADDRESS;
 
-// Reference integration time the published lux is normalised to, so the value
-// reflects brightness rather than the integration window (see luxTask). Gain is
-// fixed (4x), so it needs no normalisation; if gain ever varies, divide by it
-// here too.
+// Reference integration time and gain the published lux is normalised to, so the
+// value reflects brightness rather than the ADC integration window or gain
+// setting (see luxTask). Both are configurable; lux divides out whatever is
+// active, so it stays comparable across luxIntegrationMs / luxGain changes.
 static constexpr int kLuxRefIntegrationMs = 100;
+static constexpr int kLuxRefGain          = 4;
 
 static std::atomic<float> g_last_lux{-1.0f};
 
@@ -109,6 +110,19 @@ esp_err_t handleReprovision(MqttClient*, const std::string&, const JsonWrapper&,
     return ESP_OK;
 }
 
+// Map a requested ALS gain multiplier (1/4/16/64) to the driver enum, clamping
+// anything else to 4x. *applied receives the multiplier actually selected, used
+// both for the log line and to divide gain out of the normalised lux.
+apds9960_again_t luxGainEnum(int mult, int* applied) {
+    switch (mult) {
+        case 1:  *applied = 1;  return APDS9960_AGAIN_1X;
+        case 16: *applied = 16; return APDS9960_AGAIN_16X;
+        case 64: *applied = 64; return APDS9960_AGAIN_64X;
+        case 4:
+        default: *applied = 4;  return APDS9960_AGAIN_4X;
+    }
+}
+
 // Periodic ambient-light publishing. Owns the APDS9960 handle (may be null if
 // the sensor is absent — the task then idles).
 struct LuxCtx {
@@ -121,16 +135,25 @@ void luxTask(void* arg) {
     auto* ctx = static_cast<LuxCtx*>(arg);
     uint32_t last_ms = 0;
     int applied_integration_ms = -1;  // forces an apply on the first iteration
+    int applied_gain = -1;            // actual gain multiplier in effect
     for (;;) {
-        // Apply the configured ADC integration time, picking up live changes
-        // made over MQTT (cmnd/<name>/settings) or HTTP (/config). The driver
-        // clamps the register, so out-of-range values are harmless.
+        // Apply the configured ADC integration time and gain, picking up live
+        // changes made over MQTT (cmnd/<name>/settings) or HTTP (/config). The
+        // driver clamps the integration register and luxGainEnum clamps the gain,
+        // so out-of-range values are harmless.
         if (ctx->sensor) {
             const int want = ctx->settings->luxIntegrationMs;
             if (want > 0 && want != applied_integration_ms) {
                 apds9960_set_adc_integration_time(ctx->sensor, static_cast<uint16_t>(want));
                 applied_integration_ms = want;
                 ESP_LOGI(kTag, "APDS9960 integration time set to %d ms", want);
+            }
+            int gain_mult = kLuxRefGain;
+            const apds9960_again_t again = luxGainEnum(ctx->settings->luxGain, &gain_mult);
+            if (gain_mult != applied_gain) {
+                apds9960_set_ambient_light_gain(ctx->sensor, again);
+                applied_gain = gain_mult;
+                ESP_LOGI(kTag, "APDS9960 ALS gain set to %dx", gain_mult);
             }
         }
 
@@ -146,14 +169,21 @@ void luxTask(void* arg) {
                 // time, so a bigger number / finer resolution but not comparable
                 // across luxIntegrationMs changes.
                 const float raw = apds9960_calc_lux_from_rgb(red, green, blue);
-                // lux: normalised to kLuxRefIntegrationMs so it tracks brightness,
-                // not the integration window. The longer integration still buys
-                // resolution (more counts), but the value stays stable when
-                // luxIntegrationMs changes, so thresholds survive.
+                // cct: correlated colour temperature (K). A ratio of channels, so
+                // it is inherently independent of integration time and gain.
+                const int cct = static_cast<int>(
+                    apds9960_calculate_color_temperature(ctx->sensor, red, green, blue));
+                // lux: normalised to kLuxRefIntegrationMs / kLuxRefGain so it tracks
+                // brightness, not the integration window or gain. Longer integration
+                // and higher gain still buy resolution (more counts), but the value
+                // stays stable when luxIntegrationMs / luxGain change, so thresholds
+                // survive.
                 const int integ_ms = applied_integration_ms > 0 ? applied_integration_ms
                                                                  : kLuxRefIntegrationMs;
-                const float lux = raw * static_cast<float>(kLuxRefIntegrationMs) /
-                                  static_cast<float>(integ_ms);
+                const int gain     = applied_gain > 0 ? applied_gain : kLuxRefGain;
+                const float lux = raw *
+                    (static_cast<float>(kLuxRefIntegrationMs) / static_cast<float>(integ_ms)) *
+                    (static_cast<float>(kLuxRefGain) / static_cast<float>(gain));
                 g_last_lux.store(lux, std::memory_order_relaxed);
 
                 JsonWrapper doc;
@@ -163,12 +193,14 @@ void luxTask(void* arg) {
                 doc.AddItem("clear", static_cast<int>(clear_ch));
                 doc.AddItem("raw", raw);
                 doc.AddItem("lux", lux);
+                doc.AddItem("cct", cct);
                 doc.AddItem("integrationMs", integ_ms);
+                doc.AddItem("gain", gain);
                 doc.AddTime();
                 const std::string topic = "tele/" + ctx->settings->sensorName + "/lux";
                 ctx->mqtt->publish(topic, doc.ToString());
-                ESP_LOGI(kTag, "published %s lux=%.3f raw=%.1f (%dms)",
-                         topic.c_str(), lux, raw, integ_ms);
+                ESP_LOGI(kTag, "published %s lux=%.3f raw=%.1f (%dms %dx) cct=%dK",
+                         topic.c_str(), lux, raw, integ_ms, gain, cct);
             }
             last_ms = now_ms;
         }
@@ -285,9 +317,8 @@ apds9960_handle_t setupLightSensor() {
         ESP_LOGE(kTag, "APDS9960 enable power failed");
         return nullptr;
     }
-    // Integration time is owned by luxTask (applies settings.luxIntegrationMs and
-    // honours live changes); gain stays fixed at 4x.
-    apds9960_set_ambient_light_gain(sensor, APDS9960_AGAIN_4X);
+    // Integration time and gain are owned by luxTask, which applies
+    // settings.luxIntegrationMs / luxGain and honours live changes.
     if (apds9960_enable_color_engine(sensor, true) != ESP_OK) {
         ESP_LOGE(kTag, "APDS9960 enable ALS failed");
         return nullptr;

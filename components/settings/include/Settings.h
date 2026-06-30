@@ -24,6 +24,8 @@ public:
     int         luxPeriodSec     = 60;  // ambient-light publish period in seconds; <=0 disables
     int         luxIntegrationMs = 100; // APDS9960 ADC integration time (ms); longer = finer
                                         // resolution but saturates sooner in bright light
+    int         luxGain          = 4;   // APDS9960 ALS gain: 1, 4, 16 or 64 (x). Higher =
+                                        // more low-light sensitivity; other values clamp to 4
 
     // (key, new-value) pairs for every field that changed in the last apply.
     using ChangeList = std::vector<std::pair<std::string, std::string>>;

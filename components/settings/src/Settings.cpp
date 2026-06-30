@@ -50,6 +50,7 @@ Settings::ChangeList Settings::loadFromJson(const JsonWrapper& doc) {
     apply(doc, "ntpServer",         ntpServer,         changes);
     apply(doc, "luxPeriodSec",      luxPeriodSec,      changes);
     apply(doc, "luxIntegrationMs",  luxIntegrationMs,  changes);
+    apply(doc, "luxGain",           luxGain,           changes);
     return changes;
 }
 
@@ -63,6 +64,7 @@ JsonWrapper Settings::toJson() const {
     d.AddItem("ntpServer",         ntpServer);
     d.AddItem("luxPeriodSec",      luxPeriodSec);
     d.AddItem("luxIntegrationMs",  luxIntegrationMs);
+    d.AddItem("luxGain",           luxGain);
     return d;
 }
 
@@ -85,12 +87,13 @@ void Settings::resetToDefaults() {
     ntpServer         = defaults.ntpServer;
     luxPeriodSec      = defaults.luxPeriodSec;
     luxIntegrationMs  = defaults.luxIntegrationMs;
+    luxGain           = defaults.luxGain;
 }
 
 void Settings::log() const {
-    ESP_LOGI(TAG, "broker=%s user=%s name=%s tz=%s ntp=%s luxPeriod=%d luxIntegrationMs=%d",
+    ESP_LOGI(TAG, "broker=%s user=%s name=%s tz=%s ntp=%s luxPeriod=%d luxIntegrationMs=%d luxGain=%d",
              mqttBrokerUri.c_str(), mqttUserName.c_str(), sensorName.c_str(),
-             tz.c_str(), ntpServer.c_str(), luxPeriodSec, luxIntegrationMs);
+             tz.c_str(), ntpServer.c_str(), luxPeriodSec, luxIntegrationMs, luxGain);
 }
 
 std::string Settings::changesToJson(const ChangeList& changes) {
