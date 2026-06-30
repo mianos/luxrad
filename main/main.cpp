@@ -163,6 +163,7 @@ void luxTask(void* arg) {
                 doc.AddItem("clear", static_cast<int>(clear_ch));
                 doc.AddItem("raw", raw);
                 doc.AddItem("lux", lux);
+                doc.AddItem("integrationMs", integ_ms);
                 doc.AddTime();
                 const std::string topic = "tele/" + ctx->settings->sensorName + "/lux";
                 ctx->mqtt->publish(topic, doc.ToString());
