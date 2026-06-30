@@ -148,7 +148,7 @@ void luxTask(void* arg) {
                 doc.AddTime();
                 const std::string topic = "tele/" + ctx->settings->sensorName + "/lux";
                 ctx->mqtt->publish(topic, doc.ToString());
-                ESP_LOGI(kTag, "published %s lux=%.1f", topic.c_str(), lux);
+                ESP_LOGI(kTag, "published %s lux=%.3f", topic.c_str(), lux);
             }
             last_ms = now_ms;
         }
