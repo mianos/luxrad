@@ -1,11 +1,13 @@
 # ldr3
 
-ESP32-C3 presence sensor on **ESP-IDF v6.0.1**.
+ESP32-C3 ambient-light sensor on **ESP-IDF v6.0.1**.
 
-An **LD1125** mmWave radar (UART1) reports presence/tracking and an **APDS9960**
-ambient-light sensor (I2C0) reports lux, both published over MQTT. Settings persist
+An **APDS9960** ambient-light sensor (I2C0) reports lux over MQTT. Settings persist
 in NVS and are adjustable over MQTT and HTTP. A web server exposes health, config and
 over-the-air firmware update with rollback verification.
+
+> A radar-equipped variant (LD1125 mmWave presence + lux) lives on the
+> [`with-radar`](https://github.com/mianos/luxrad/tree/with-radar) branch.
 
 ## Components
 
@@ -16,7 +18,7 @@ keep their own repos; the MQTT and settings wrappers are vendored under `compone
 | Component | Source |
 |---|---|
 | `jsonwrapper`, `nvsstoragemanager`, `wifimanager`, `webserver` | mianesp @ `idf6-network-provisioning` |
-| `ldradar` (LD1125), `apds9960` | own git repos @ `main` |
+| `apds9960` | own git repo @ `main` |
 | `espressif/cjson`, `espressif/mqtt`, `espressif/network_provisioning` | Espressif registry |
 | `mqttwrapper`, `settings` | vendored in `components/` |
 
@@ -44,11 +46,10 @@ back to the previous slot.
 
 ## MQTT topics
 
-Published (`tele/<name>/…`): `init`, `status` (uptime/heap), `radar` (presence events),
-`lux`, `settingsack`. Commands (`cmnd/<name>/…`): `settings`, `restart`, `reprovision`.
+Published (`tele/<name>/…`): `init`, `status` (uptime/heap), `lux`, `settingsack`.
+Commands (`cmnd/<name>/…`): `settings`, `restart`, `reprovision`.
 
 ```
-mosquitto_pub -h mqtt2.mianos.com -t cmnd/ldr/settings -m '{"presencePeriodSec":5}'
 mosquitto_pub -h mqtt2.mianos.com -t cmnd/ldr/settings -m '{"luxPeriodSec":30}'
 ```
 

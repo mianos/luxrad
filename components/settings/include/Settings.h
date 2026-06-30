@@ -7,7 +7,7 @@
 #include "NvsStorageManager.h"
 #include "JsonWrapper.h"
 
-// Persistent device configuration for the ldr3 presence sensor. Mirrors the
+// Persistent device configuration for the ldr3 ambient-light sensor. Mirrors the
 // doorbell3 appsettings pattern: the whole config is stored as a single JSON
 // blob in NVS (via NvsStorageManager) under one key. Missing/garbage config
 // falls back to the compiled-in defaults below (fail-fast + log).
@@ -21,8 +21,7 @@ public:
     std::string sensorName       = "ldr";
     std::string tz               = "AEST-10AEDT,M10.1.0,M4.1.0/3";
     std::string ntpServer        = "time.google.com";
-    int         luxPeriodSec     = 60;  // standalone lux series; lux also rides every radar event. <=0 disables
-    int         presencePeriodSec = 1;  // <=0 disables presence publishing
+    int         luxPeriodSec     = 60;  // ambient-light publish period in seconds; <=0 disables
 
     // (key, new-value) pairs for every field that changed in the last apply.
     using ChangeList = std::vector<std::pair<std::string, std::string>>;

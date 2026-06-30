@@ -9,7 +9,6 @@ idf_component_register(SRCS "main.cpp" "LdrWebServer.cpp"
                          settings
                          mqttwrapper
                          webserver
-                         ldradar
                          apds9960
                          jsonwrapper
                          espressif__mqtt
@@ -18,6 +17,5 @@ idf_component_register(SRCS "main.cpp" "LdrWebServer.cpp"
                          nvs_flash
                          app_update
                          esp_timer
-                         esp_driver_uart
                          esp_driver_gpio
                          esp_driver_i2c)

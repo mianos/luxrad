@@ -167,9 +167,9 @@ esp_err_t LdrWebServer::config_get_handler(httpd_req_t* req) {
 }
 
 // POST /config — apply any subset of the settings keys, persist, return the new
-// full settings. luxPeriodSec/presencePeriodSec take effect immediately (the
-// tasks read them each loop); sensorName/mqtt/tz changes take effect on the
-// next reboot (they re-derive topics + the MQTT connection).
+// full settings. luxPeriodSec takes effect immediately (the lux task reads it
+// each loop); sensorName/mqtt/tz changes take effect on the next reboot (they
+// re-derive topics + the MQTT connection).
 esp_err_t LdrWebServer::config_post_handler(httpd_req_t* req) {
     LdrWebServer* self = static_cast<LdrWebServer*>(req->user_ctx);
     if (req->content_len > kMaxJsonBodyBytes) return sendJsonError(req, 413, "request body too large");

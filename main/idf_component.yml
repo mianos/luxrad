@@ -17,10 +17,7 @@ dependencies:
     path: components/webserver
     version: idf6-network-provisioning
 
-  # Sensor drivers — hardware-specific, kept on their own repos.
-  ldradar:
-    git: https://github.com/mianos/ldradar.git
-    version: main
+  # Sensor driver — hardware-specific, kept on its own repo.
   apds9960:
     git: https://github.com/mianos/apds9960.git
     version: main

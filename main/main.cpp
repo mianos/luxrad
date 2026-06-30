@@ -1,11 +1,10 @@
-// ldr3 — ESP32-C3 presence sensor on ESP-IDF v6.
+// ldr3 — ESP32-C3 ambient-light sensor on ESP-IDF v6.
 //
-// An LD1125 mmWave radar (UART) reports presence/tracking and an APDS9960
-// ambient-light sensor (I2C) reports lux, both published over MQTT. Settings
-// live in NVS and are adjustable over MQTT (cmnd/<name>/settings) and HTTP
-// (/config). A web server exposes /healthz, /config and OTA (/firmware) with
-// rollback verification. Shared infrastructure (wifimanager, mqttwrapper,
-// webserver, jsonwrapper, nvsstoragemanager) comes from the mianesp components.
+// An APDS9960 ambient-light sensor (I2C) reports lux over MQTT. Settings live in
+// NVS and are adjustable over MQTT (cmnd/<name>/settings) and HTTP (/config). A
+// web server exposes /healthz, /config and OTA (/firmware) with rollback
+// verification. Shared infrastructure (wifimanager, mqttwrapper, webserver,
+// jsonwrapper, nvsstoragemanager) comes from the mianesp components.
 
 #include <atomic>
 #include <cstring>
@@ -24,7 +23,6 @@
 
 #include "driver/gpio.h"
 #include "driver/i2c_master.h"
-#include "driver/uart.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -34,32 +32,21 @@ extern "C" {
 #include "apds9960.h"
 }
 
-#include "LD1125.h"
-#include "DebounceRadar.h"
-#include "RadarSensor.h"
-#include "Events.h"
-
 #include "JsonWrapper.h"
 #include "NvsStorageManager.h"
 #include "Settings.h"
 #include "WifiManager.h"
 #include "MqttClient.h"
-#include "MqttEventProc.h"
 #include "WebServer.h"
 #include "LdrWebServer.h"
 
 static const char* kTag = "ldr3";
-static const char* kRadarTag = "ld1125_main";
 
 static constexpr gpio_num_t kPinScl = GPIO_NUM_7;
 static constexpr gpio_num_t kPinSda = GPIO_NUM_6;
 static constexpr gpio_num_t kPinVl  = GPIO_NUM_21;
 
 static constexpr uint8_t kApdsAddr = APDS9960_I2C_ADDRESS;
-
-static constexpr uart_port_t kUartPort = UART_NUM_1;
-static constexpr gpio_num_t   kUartTx  = GPIO_NUM_3;
-static constexpr gpio_num_t   kUartRx  = GPIO_NUM_2;
 
 static std::atomic<float> g_last_lux{-1.0f};
 
@@ -116,87 +103,8 @@ esp_err_t handleReprovision(MqttClient*, const std::string&, const JsonWrapper&,
     return ESP_OK;
 }
 
-// ---- Radar event sinks ----
-
-class PrintEP : public EventProc {
-public:
-    void Detected(Value* value_ptr) override {
-        if (value_ptr == nullptr) return;
-        JsonWrapper doc;
-        doc.AddItem("event", std::string("detected"));
-        value_ptr->toJson(doc);
-        ESP_LOGI(kRadarTag, "%s", doc.ToString().c_str());
-    }
-    void Cleared() override {
-        JsonWrapper doc;
-        doc.AddItem("event", std::string("cleared"));
-        ESP_LOGI(kRadarTag, "%s", doc.ToString().c_str());
-    }
-    void TrackingUpdate(Value* value_ptr) override {
-        if (value_ptr == nullptr) return;
-        const uint32_t interval_ms = static_cast<uint32_t>(CONFIG_LD1125_TRACKING_INTERVAL_MS);
-        static uint32_t last_ms = 0;
-        const uint32_t now_ms = static_cast<uint32_t>(esp_timer_get_time() / 1000);
-        if (interval_ms == 0 || now_ms - last_ms >= interval_ms) {
-            JsonWrapper doc;
-            doc.AddItem("event", std::string("tracking"));
-            value_ptr->toJson(doc);
-            ESP_LOGI(kRadarTag, "%s", doc.ToString().c_str());
-            last_ms = now_ms;
-        }
-    }
-    void PresenceUpdate(Value* value_ptr) override {
-        const uint32_t interval_ms = static_cast<uint32_t>(CONFIG_LD1125_PRESENCE_INTERVAL_MS);
-        static uint32_t last_ms = 0;
-        const uint32_t now_ms = static_cast<uint32_t>(esp_timer_get_time() / 1000);
-        if (interval_ms == 0 || now_ms - last_ms >= interval_ms) {
-            JsonWrapper doc;
-            doc.AddItem("event", std::string("presence"));
-            if (value_ptr) value_ptr->toJson(doc);
-            ESP_LOGI(kRadarTag, "%s", doc.ToString().c_str());
-            last_ms = now_ms;
-        }
-    }
-};
-
-// Fan an event out to both the console logger and the MQTT publisher.
-class CombinedEP : public EventProc {
-public:
-    CombinedEP(EventProc* ep_a_in, EventProc* ep_b_in) : ep_a(ep_a_in), ep_b(ep_b_in) {}
-    void Detected(Value* value_ptr) override {
-        if (ep_a) ep_a->Detected(value_ptr);
-        if (ep_b) ep_b->Detected(value_ptr);
-    }
-    void Cleared() override {
-        if (ep_a) ep_a->Cleared();
-        if (ep_b) ep_b->Cleared();
-    }
-    void TrackingUpdate(Value* value_ptr) override {
-        if (ep_a) ep_a->TrackingUpdate(value_ptr);
-        if (ep_b) ep_b->TrackingUpdate(value_ptr);
-    }
-    void PresenceUpdate(Value* value_ptr) override {
-        if (ep_a) ep_a->PresenceUpdate(value_ptr);
-        if (ep_b) ep_b->PresenceUpdate(value_ptr);
-    }
-private:
-    EventProc* ep_a;
-    EventProc* ep_b;
-};
-
-void radarTask(void* arg) {
-    auto* combined = static_cast<CombinedEP*>(arg);
-    LD1125 ld1125(combined, kUartPort);
-    ld1125.verifyTestMode();
-    DebounceRadar debounced(&ld1125, combined, 1000);
-    for (;;) {
-        debounced.process(0.0f);
-        vTaskDelay(pdMS_TO_TICKS(20));
-    }
-}
-
 // Periodic ambient-light publishing. Owns the APDS9960 handle (may be null if
-// the sensor is absent — radar then runs alone).
+// the sensor is absent — the task then idles).
 struct LuxCtx {
     apds9960_handle_t sensor;
     Settings*         settings;
@@ -300,7 +208,7 @@ void otaVerifyTask(void*) {
 }
 
 // Configure the VL gating pin, bring up the I2C bus and the APDS9960. Returns
-// null (and logs) if the sensor is absent; radar keeps running regardless.
+// null (and logs) if the sensor is absent.
 apds9960_handle_t setupLightSensor() {
     gpio_config_t vl_cfg;
     std::memset(&vl_cfg, 0, sizeof(vl_cfg));
@@ -351,37 +259,11 @@ apds9960_handle_t setupLightSensor() {
     return sensor;
 }
 
-// Bring up UART1 for the LD1125 radar. Returns false on failure.
-bool setupRadarUart() {
-    uart_config_t uart_cfg;
-    std::memset(&uart_cfg, 0, sizeof(uart_cfg));
-    uart_cfg.baud_rate  = 115200;
-    uart_cfg.data_bits  = UART_DATA_8_BITS;
-    uart_cfg.parity     = UART_PARITY_DISABLE;
-    uart_cfg.stop_bits  = UART_STOP_BITS_1;
-    uart_cfg.flow_ctrl  = UART_HW_FLOWCTRL_DISABLE;
-    uart_cfg.source_clk = UART_SCLK_DEFAULT;
-
-    if (uart_param_config(kUartPort, &uart_cfg) != ESP_OK) {
-        ESP_LOGE(kRadarTag, "uart_param_config failed");
-        return false;
-    }
-    if (uart_set_pin(kUartPort, kUartTx, kUartRx, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE) != ESP_OK) {
-        ESP_LOGE(kRadarTag, "uart_set_pin failed");
-        return false;
-    }
-    if (uart_driver_install(kUartPort, 2048, 0, 0, nullptr, 0) != ESP_OK) {
-        ESP_LOGE(kRadarTag, "uart_driver_install failed");
-        return false;
-    }
-    return true;
-}
-
 }  // namespace
 
 extern "C" void app_main(void) {
-    // Silence info-level logs globally (keeps the per-event radar/lux JSON
-    // prints quiet) but keep network bring-up visible so Wi-Fi association and
+    // Silence info-level logs globally (keeps the per-reading lux JSON prints
+    // quiet) but keep network bring-up visible so Wi-Fi association and
     // provisioning state can be seen.
     esp_log_level_set("*", ESP_LOG_WARN);
     esp_log_level_set("WiFiManager", ESP_LOG_INFO);
@@ -439,19 +321,8 @@ extern "C" void app_main(void) {
     // OTA: verify a freshly-OTA'd image once it's back online; roll back if not.
     xTaskCreate(otaVerifyTask, "ota_verify", 4096, nullptr, 4, nullptr);
 
-    // Radar -> console + MQTT.
-    static PrintEP print_ep;
-    static MqttEventProc mqtt_ep(settings, mqtt, g_last_lux);
-    static CombinedEP combined_ep(&print_ep, &mqtt_ep);
-
     apds9960_handle_t sensor = setupLightSensor();
     static LuxCtx lux_ctx{ sensor, &settings, &mqtt };
-
-    if (!setupRadarUart()) {
-        ESP_LOGE(kRadarTag, "radar UART init failed; radar disabled");
-    } else {
-        xTaskCreate(radarTask, "radar", 4096, &combined_ep, 5, nullptr);
-    }
 
     xTaskCreate(luxTask, "lux", 4096, &lux_ctx, 4, nullptr);
     xTaskCreate(telemetryTask, "telemetry", 4096, &app, 4, nullptr);
