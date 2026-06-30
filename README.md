@@ -49,10 +49,19 @@ back to the previous slot.
 Published (`tele/<name>/…`): `init`, `status` (uptime/heap), `lux`, `settingsack`.
 Commands (`cmnd/<name>/…`): `settings`, `restart`, `reprovision`.
 
+The `lux` payload carries the raw `red`/`green`/`blue`/`clear` channel counts plus:
+
+* `raw` — un-normalised illuminance index. Scales with `luxIntegrationMs`, so it
+  is a bigger number with finer resolution at longer integration; not comparable
+  across integration-time changes.
+* `lux` — `raw` normalised to a 100 ms reference, so it tracks actual brightness
+  and stays stable when `luxIntegrationMs` changes. Use this for thresholds.
+
 ```
 mosquitto_pub -h mqtt2.mianos.com -t cmnd/ldr/settings -m '{"luxPeriodSec":30}'
-# longer ADC integration -> finer lux resolution (saturates sooner in bright light)
-mosquitto_pub -h mqtt2.mianos.com -t cmnd/ldr/settings -m '{"luxIntegrationMs":178}'
+# longer ADC integration -> finer resolution (saturates sooner in bright light).
+# raw scales with this; lux stays stable.
+mosquitto_pub -h mqtt2.mianos.com -t cmnd/ldr/settings -m '{"luxIntegrationMs":712}'
 ```
 
 ## HTTP

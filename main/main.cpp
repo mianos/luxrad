@@ -48,6 +48,12 @@ static constexpr gpio_num_t kPinVl  = GPIO_NUM_21;
 
 static constexpr uint8_t kApdsAddr = APDS9960_I2C_ADDRESS;
 
+// Reference integration time the published lux is normalised to, so the value
+// reflects brightness rather than the integration window (see luxTask). Gain is
+// fixed (4x), so it needs no normalisation; if gain ever varies, divide by it
+// here too.
+static constexpr int kLuxRefIntegrationMs = 100;
+
 static std::atomic<float> g_last_lux{-1.0f};
 
 namespace {
@@ -136,7 +142,18 @@ void luxTask(void* arg) {
             uint16_t red = 0, green = 0, blue = 0, clear_ch = 0;
             if (apds9960_color_data_ready(ctx->sensor) &&
                 apds9960_get_color_data(ctx->sensor, &red, &green, &blue, &clear_ch) == ESP_OK) {
-                float lux = apds9960_calc_lux_from_rgb(red, green, blue);
+                // raw: un-normalised illuminance index — scales with integration
+                // time, so a bigger number / finer resolution but not comparable
+                // across luxIntegrationMs changes.
+                const float raw = apds9960_calc_lux_from_rgb(red, green, blue);
+                // lux: normalised to kLuxRefIntegrationMs so it tracks brightness,
+                // not the integration window. The longer integration still buys
+                // resolution (more counts), but the value stays stable when
+                // luxIntegrationMs changes, so thresholds survive.
+                const int integ_ms = applied_integration_ms > 0 ? applied_integration_ms
+                                                                 : kLuxRefIntegrationMs;
+                const float lux = raw * static_cast<float>(kLuxRefIntegrationMs) /
+                                  static_cast<float>(integ_ms);
                 g_last_lux.store(lux, std::memory_order_relaxed);
 
                 JsonWrapper doc;
@@ -144,11 +161,13 @@ void luxTask(void* arg) {
                 doc.AddItem("green", static_cast<int>(green));
                 doc.AddItem("blue", static_cast<int>(blue));
                 doc.AddItem("clear", static_cast<int>(clear_ch));
+                doc.AddItem("raw", raw);
                 doc.AddItem("lux", lux);
                 doc.AddTime();
                 const std::string topic = "tele/" + ctx->settings->sensorName + "/lux";
                 ctx->mqtt->publish(topic, doc.ToString());
-                ESP_LOGI(kTag, "published %s lux=%.3f", topic.c_str(), lux);
+                ESP_LOGI(kTag, "published %s lux=%.3f raw=%.1f (%dms)",
+                         topic.c_str(), lux, raw, integ_ms);
             }
             last_ms = now_ms;
         }
