@@ -12,12 +12,12 @@ over-the-air firmware update with rollback verification.
 ## Components
 
 Shared infrastructure is pulled from the [`mianesp`](https://github.com/mianos/mianesp)
-repo (branch `idf6-network-provisioning`) and the Espressif registry; sensor drivers
+repo (branch `main`) and the Espressif registry; sensor drivers
 keep their own repos; the MQTT and settings wrappers are vendored under `components/`.
 
 | Component | Source |
 |---|---|
-| `jsonwrapper`, `nvsstoragemanager`, `wifimanager`, `webserver` | mianesp @ `idf6-network-provisioning` |
+| `jsonwrapper`, `nvsstoragemanager`, `wifimanager`, `webserver` | mianesp @ `main` |
 | `apds9960` | own git repo @ `main` |
 | `espressif/cjson`, `espressif/mqtt`, `espressif/network_provisioning` | Espressif registry |
 | `mqttwrapper`, `settings` | vendored in `components/` |
