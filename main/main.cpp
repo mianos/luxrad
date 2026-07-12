@@ -20,6 +20,7 @@
 #include "esp_timer.h"
 #include "esp_sntp.h"
 #include "esp_ota_ops.h"
+#include "esp_app_desc.h"
 
 #include "driver/gpio.h"
 #include "driver/i2c_master.h"
@@ -218,7 +219,7 @@ void telemetryTask(void* arg) {
     }
 
     JsonWrapper init;
-    init.AddItem("version", 5);
+    init.AddItem("version", std::string(esp_app_get_description()->version));
     init.AddTime();
     init.AddTime(false, "gmt");
     init.AddItem("hostname", app->settings->sensorName);

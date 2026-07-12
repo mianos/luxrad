@@ -18,7 +18,10 @@ public:
     std::string mqttBrokerUri    = "mqtt://mqtt2.mianos.com";
     std::string mqttUserName     = "";
     std::string mqttUserPassword = "";
-    std::string sensorName       = "ldr";
+    // Default must never be the name of a deployed device: sensorName is the
+    // MQTT client-id, so a /config/reset (or fresh unit) colliding with a live
+    // sensor would kick both off the broker in a connect loop.
+    std::string sensorName       = "ldr3";
     std::string tz               = "AEST-10AEDT,M10.1.0,M4.1.0/3";
     std::string ntpServer        = "time.google.com";
     int         luxPeriodSec     = 60;  // ambient-light publish period in seconds; <=0 disables
